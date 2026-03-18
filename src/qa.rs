@@ -14,9 +14,9 @@ pub fn build_qa_prompt(
     session: &str,
     dev_window: &str, // base name, e.g. "WIS-olive"
 ) -> String {
-    // The QA agent lives in window "<dev_window>-qa" and uses tmux rename-window
-    // (by index) to update the dev window's phase suffix.
-    // We tell the agent to run `tmux list-windows` to find the dev window index,
+    // The QA agent runs inside the dev window itself (renamed to :qa) and uses
+    // tmux rename-window (by index) to update its phase suffix on handoff/escalation.
+    // We tell the agent to run `tmux list-windows` to find the window index,
     // then rename it — this avoids colon-in-target ambiguity.
     let rename_cmd = format!(
         "tmux list-windows -t {session} -F '#{{window_index}} #{{window_name}}' \
@@ -117,6 +117,10 @@ pub fn build_qa_prompt(
 }
 
 /// Spawn a QA agent for the given worktree and PR number.
+///
+/// The dev window (`WIS-olive:dev`) is renamed to `WIS-olive:qa` and its
+/// running opencode process is replaced with a fresh TUI running the QA prompt.
+/// No separate `-qa` window is created — the lifecycle lives in one window.
 pub fn cmd_qa(registry: &Registry, worktree_name: &str, pr_number: u64) -> Result<()> {
     let worktree = registry.find_worktree(worktree_name).with_context(|| {
         format!(
@@ -131,34 +135,25 @@ pub fn cmd_qa(registry: &Registry, worktree_name: &str, pr_number: u64) -> Resul
 
     // The base window name (no phase suffix), e.g. "WIS-olive"
     let base_name = tmux::base_window_name(worktree_name).to_string();
+    let abs_path_str = worktree.abs_path.to_string_lossy().to_string();
 
     let prompt = build_qa_prompt(&repo_slug, &branch, pr_number, &session, &base_name);
 
-    // QA windows are named "<base>-qa", e.g. "WIS-olive-qa".
-    let qa_window_name = format!("{}-qa", base_name);
-    let abs_path_str = worktree.abs_path.to_string_lossy().to_string();
-
     info!(
-        "[{}] Spawning QA agent for PR #{} in session '{}', dir {}",
-        qa_window_name, pr_number, session, abs_path_str
+        "[{}] Starting QA for PR #{} in session '{}'",
+        base_name, pr_number, session
     );
 
-    let is_new = tmux::spawn_window(&session, &qa_window_name, &abs_path_str, &prompt)?;
-
-    // Transition the dev window: WIS-olive:dev -> WIS-olive:qa
+    // Transition: WIS-olive:dev -> WIS-olive:qa
     tmux::set_window_phase(&session, &base_name, Some("qa"))?;
 
-    if is_new {
-        println!(
-            "Spawned QA agent '{}' in a new window for PR #{}.",
-            qa_window_name, pr_number
-        );
-    } else {
-        println!(
-            "Sent QA task to existing '{}' window for PR #{}.",
-            qa_window_name, pr_number
-        );
-    }
+    // Replace the dev agent with a fresh opencode TUI running the QA prompt.
+    tmux::replace_window_process(&session, &base_name, &abs_path_str, &prompt)?;
+
+    println!(
+        "QA agent started for '{}' (PR #{}) — window is now '{}:qa'.",
+        base_name, pr_number, base_name
+    );
 
     Ok(())
 }
@@ -251,5 +246,69 @@ mod tests {
         assert!(prompt.contains("acme/repo"));
         assert!(prompt.contains("WIS-olive:review"));
         assert!(prompt.contains("WIS-olive:blocked"));
+    }
+
+    // --- new tests ---
+
+    #[test]
+    fn test_parse_github_slug_with_trailing_newline() {
+        // `git remote get-url` output is trimmed before calling parse_github_slug;
+        // but the function itself should also handle leading/trailing whitespace gracefully.
+        // The function trims ".git" only; whitespace trimming happens in the caller.
+        // Verify that a clean URL (already trimmed) still works.
+        assert_eq!(
+            parse_github_slug("https://github.com/owner/repo.git"),
+            Some("owner/repo".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_github_slug_ssh_no_dot_git() {
+        assert_eq!(
+            parse_github_slug("git@github.com:owner/repo"),
+            Some("owner/repo".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_github_slug_empty_string() {
+        assert_eq!(parse_github_slug(""), None);
+    }
+
+    #[test]
+    fn test_parse_github_slug_non_github_ssh() {
+        assert_eq!(parse_github_slug("git@gitlab.com:owner/repo.git"), None);
+    }
+
+    #[test]
+    fn test_build_qa_prompt_contains_rename_commands() {
+        let prompt = build_qa_prompt("acme/repo", "feat/x", 7, "my-session", "PROJ-branch");
+        // The awk-based rename command must reference the correct session and base window.
+        assert!(prompt.contains("my-session"));
+        assert!(prompt.contains("PROJ-branch"));
+        // Ensure gh pr diff and gh pr checks commands are present.
+        assert!(prompt.contains("gh pr diff 7"));
+        assert!(prompt.contains("gh pr checks 7"));
+        assert!(prompt.contains("gh pr view 7"));
+        assert!(prompt.contains("gh pr comment 7"));
+        assert!(prompt.contains("gh pr edit 7"));
+    }
+
+    #[test]
+    fn test_build_qa_prompt_correct_branch_rule() {
+        let prompt = build_qa_prompt("o/r", "my-branch", 1, "s", "W-w");
+        // The prompt must tell the agent to push only to the correct branch.
+        assert!(prompt.contains("'my-branch'"));
+    }
+
+    #[test]
+    fn test_build_qa_prompt_qa_window_naming_convention() {
+        // The QA window is named <base>-qa by cmd_qa; the prompt itself references
+        // the dev window base name and phase suffixes, not the QA window name.
+        let prompt = build_qa_prompt("o/r", "b", 99, "ses", "DEV-main");
+        assert!(prompt.contains("DEV-main:review"));
+        assert!(prompt.contains("DEV-main:blocked"));
+        // Should NOT accidentally contain the QA window name.
+        assert!(!prompt.contains("DEV-main-qa"));
     }
 }

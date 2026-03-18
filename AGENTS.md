@@ -157,11 +157,12 @@ task-master includes an automated QA agent loop that runs between an agent openi
 
 ```
 Agent does work on a worktree
+  -> window:  WIS-olive:dev
   -> opens PR:  gh pr create --label wip --title "..." --body "..."
   -> pushes branch
   -> post-push hook fires automatically
   -> task-master qa <worktree> <pr-number>  (non-blocking)
-  -> QA agent spawns in a new tmux window named <PROJECT>-<worktree>-qa
+  -> SAME window renamed WIS-olive:qa, fresh opencode TUI starts with QA prompt
 
 QA agent (up to 3 iterations):
   1. Self-reviews the diff
@@ -170,13 +171,16 @@ QA agent (up to 3 iterations):
   4. Pushes fixes, waits 90s, re-checks
 
 When clean:
+  -> window renamed WIS-olive:review
   -> Posts "Ready for human review" comment on the PR
   -> Removes the 'wip' label
-  -> Exits
+  -> opencode TUI stays open — human can read summary and give follow-up instructions
 
 If stuck after 3 iterations:
+  -> window renamed WIS-olive:blocked
   -> Posts escalation comment listing what needs human input
-  -> Leaves 'wip' label on (signals humans to look at the comment)
+  -> Leaves 'wip' label on
+  -> opencode TUI stays open — human can read what was tried and intervene
 
 Human reviews and merges.
 ```
@@ -213,10 +217,15 @@ task-master qa WIS-olive 42
 - Never remove the `wip` label yourself — the QA agent owns that.
 - The QA agent will push `qa:` prefixed commits directly to your branch; do not rebase while it is running.
 
-### QA agent tmux windows
+### QA agent tmux window lifecycle
 
-QA agent windows are named `<PROJECT>-<worktree>-qa`, e.g.:
-- Original agent: `WIS-olive`
-- QA agent:       `WIS-olive-qa`
+Each worktree window has a single lifecycle — no separate QA window is created:
 
-This lets you monitor both windows independently in tmux.
+```
+WIS-olive:dev     <- agent works here
+WIS-olive:qa      <- QA agent runs here (same window, fresh opencode session)
+WIS-olive:review  <- QA complete, opencode TUI stays open for human review
+WIS-olive:blocked <- QA escalated, opencode TUI stays open for human intervention
+```
+
+When making follow-up instructions after QA completes, just type in the window directly.

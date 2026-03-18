@@ -1,0 +1,18 @@
+[[projects]]
+name = "warehouse-integration-service"
+short = "WIS"
+repo = "projects/warehouse-integration-service"
+
+  [[projects.worktrees]]
+  name = "olive"
+
+[[projects.worktrees]]
+name = "cedar"
+
+[[projects.worktrees]]
+name = "birch"
+
+[[projects]]
+name = "aws-tui"
+short = "ATUI"
+repo = "projects/aws-tui"

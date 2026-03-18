@@ -98,6 +98,44 @@ pub fn set_window_phase(session: &str, base_name: &str, phase: Option<&str>) -> 
     }
 }
 
+/// Interrupt whatever is running in an existing window and start a fresh
+/// opencode TUI with the given prompt.
+///
+/// Sends C-c twice (to reliably exit the opencode TUI), waits briefly, then
+/// runs `opencode --prompt <prompt>` in the same window. The window is
+/// identified by its base name (prefix before any ':').
+pub fn replace_window_process(
+    session: &str,
+    base_name: &str,
+    working_dir: &str,
+    prompt: &str,
+) -> Result<()> {
+    let idx = find_window_index(session, base_name).with_context(|| {
+        format!(
+            "Window with base name '{}' not found in session '{}'",
+            base_name, session
+        )
+    })?;
+    let target = format!("{}:{}", session, idx);
+
+    // Two C-c presses to ensure the opencode TUI exits cleanly.
+    tmux(&["send-keys", "-t", &target, "C-c"])?;
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    tmux(&["send-keys", "-t", &target, "C-c"])?;
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // cd to working dir then launch fresh opencode TUI with the prompt.
+    let cmd = format!(
+        "cd {} && opencode --prompt {}",
+        shell_escape(working_dir),
+        shell_escape(prompt)
+    );
+    tmux(&["send-keys", "-t", &target, &cmd])?;
+    tmux(&["send-keys", "-t", &target, "Enter"])?;
+
+    Ok(())
+}
+
 /// Spawn an opencode agent for a worktree.
 ///
 /// `window_name` must be the **base** name (no phase suffix), e.g. "WIS-olive".
@@ -119,8 +157,8 @@ pub fn spawn_window(
         return Ok(false);
     }
 
-    // New window — create it with the :dev phase suffix immediately.
-    let dev_name = format!("{}:dev", window_name);
+    // New window — always created with the :dev phase suffix.
+    let initial_name = format!("{}:dev", window_name);
     let end_target = format!("{}:", session);
     let opencode_cmd = format!("opencode --prompt {}", shell_escape(prompt));
     tmux(&[
@@ -129,14 +167,14 @@ pub fn spawn_window(
         "-t",
         &end_target,
         "-n",
-        &dev_name,
+        &initial_name,
         "-c",
         working_dir,
     ])?;
 
-    // After creation the window is named dev_name; find it by base to get its index.
+    // After creation the window is named initial_name; find it by base to get its index.
     let idx = find_window_index(session, window_name)
-        .with_context(|| format!("Could not find newly created window '{}'", dev_name))?;
+        .with_context(|| format!("Could not find newly created window '{}'", initial_name))?;
     let target = format!("{}:{}", session, idx);
     tmux(&["send-keys", "-t", &target, &opencode_cmd])?;
     tmux(&["send-keys", "-t", &target, "Enter"])?;
@@ -163,5 +201,116 @@ mod tests {
     #[test]
     fn test_base_window_name_no_phase() {
         assert_eq!(base_window_name("WIS-olive"), "WIS-olive");
+    }
+
+    #[test]
+    fn test_base_window_name_multiple_colons_returns_before_first() {
+        // Only the first colon is the phase separator; anything after is part of the phase label.
+        assert_eq!(base_window_name("WIS-olive:dev:extra"), "WIS-olive");
+    }
+
+    #[test]
+    fn test_base_window_name_colon_at_start() {
+        // Degenerate: name begins with colon — base is the empty slice.
+        assert_eq!(base_window_name(":dev"), "");
+    }
+
+    #[test]
+    fn test_base_window_name_empty_string() {
+        assert_eq!(base_window_name(""), "");
+    }
+
+    // ---------------------------------------------------------------------------
+    // shell_escape
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_shell_escape_plain_string() {
+        assert_eq!(shell_escape("hello world"), "'hello world'");
+    }
+
+    #[test]
+    fn test_shell_escape_empty_string() {
+        assert_eq!(shell_escape(""), "''");
+    }
+
+    #[test]
+    fn test_shell_escape_contains_single_quote() {
+        // Single quotes inside the string must be escaped as '\''
+        assert_eq!(shell_escape("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn test_shell_escape_multiple_single_quotes() {
+        assert_eq!(shell_escape("a'b'c"), "'a'\\''b'\\''c'");
+    }
+
+    #[test]
+    fn test_shell_escape_no_mutation_for_double_quotes() {
+        // Double quotes are safe inside single-quoted shell strings.
+        assert_eq!(shell_escape("say \"hi\""), "'say \"hi\"'");
+    }
+
+    #[test]
+    fn test_shell_escape_special_chars_preserved() {
+        // $, !, backtick etc. are safe inside single-quoted strings.
+        let input = "$(rm -rf /) && echo `id`";
+        let escaped = shell_escape(input);
+        assert!(escaped.starts_with('\''));
+        assert!(escaped.ends_with('\''));
+        // The dangerous characters must not be expanded — they remain literal.
+        assert!(escaped.contains("$(rm -rf /)"));
+    }
+
+    // -------------------------------------------------------------------------
+    // shell_escape round-trip: verify bash evaluates the escaped string back
+    // to the original. Requires /bin/bash to be available.
+    // -------------------------------------------------------------------------
+
+    fn bash_eval(expr: &str) -> Option<String> {
+        let out = std::process::Command::new("bash")
+            .args(["-c", &format!("printf '%s' {}", expr)])
+            .output()
+            .ok()?;
+        if out.status.success() {
+            Some(String::from_utf8_lossy(&out.stdout).to_string())
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn test_shell_escape_roundtrip_plain() {
+        let input = "hello world";
+        let escaped = shell_escape(input);
+        assert_eq!(bash_eval(&escaped).unwrap(), input);
+    }
+
+    #[test]
+    fn test_shell_escape_roundtrip_single_quote() {
+        let input = "it's a test";
+        let escaped = shell_escape(input);
+        assert_eq!(bash_eval(&escaped).unwrap(), input);
+    }
+
+    #[test]
+    fn test_shell_escape_roundtrip_dollar_and_backtick() {
+        let input = "price: $100 and `whoami`";
+        let escaped = shell_escape(input);
+        assert_eq!(bash_eval(&escaped).unwrap(), input);
+    }
+
+    #[test]
+    fn test_shell_escape_roundtrip_empty() {
+        let input = "";
+        let escaped = shell_escape(input);
+        assert_eq!(bash_eval(&escaped).unwrap(), input);
+    }
+
+    #[test]
+    fn test_shell_escape_roundtrip_newlines_and_tabs() {
+        let input = "line1\nline2\ttabbed";
+        let escaped = shell_escape(input);
+        assert_eq!(bash_eval(&escaped).unwrap(), input);
     }
 }

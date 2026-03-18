@@ -4,3 +4,13 @@ projects/*
 # Dolt database files (added by bd init)
 .dolt/
 *.db
+
+# Rust build artifacts
+/target
+
+# PID files for tracked opencode servers
+.*.pid
+
+# Serena LSP tooling
+.serena/
+

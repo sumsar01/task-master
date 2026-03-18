@@ -217,36 +217,10 @@ fn cmd_add_worktree(
     // Append to task-master.toml
     let config_path = base_dir.join("task-master.toml");
     let contents = std::fs::read_to_string(&config_path)?;
-    let mut doc = contents
-        .parse::<DocumentMut>()
-        .context("Failed to parse task-master.toml")?;
 
-    // Find the right project array entry and push a new worktree
-    let projects = doc["projects"]
-        .as_array_of_tables_mut()
-        .context("Missing [[projects]] in task-master.toml")?;
-
-    let proj_entry = projects
-        .iter_mut()
-        .find(|p| {
-            p.get("short")
-                .and_then(|v| v.as_str())
-                .map(|s| s.eq_ignore_ascii_case(project_short))
-                .unwrap_or(false)
-        })
-        .with_context(|| format!("Project '{}' not found in config file", project_short))?;
-
-    let worktrees = proj_entry
-        .entry("worktrees")
-        .or_insert(Item::ArrayOfTables(toml_edit::ArrayOfTables::new()))
-        .as_array_of_tables_mut()
-        .context("worktrees is not an array of tables")?;
-
-    let mut new_wt = Table::new();
-    new_wt.insert("name", value(worktree_name));
-    worktrees.push(new_wt);
-
-    std::fs::write(&config_path, doc.to_string())?;
+    let new_toml = append_worktree_to_toml(&contents, project_short, worktree_name)
+        .context("Failed to update task-master.toml")?;
+    std::fs::write(&config_path, new_toml)?;
 
     println!(
         "Added {}. Spawn with:\n  task-master spawn {} \"<prompt>\"",
@@ -339,4 +313,223 @@ fn cmd_reset(worktree: &str) -> Result<()> {
     tmux::set_window_phase(&session, base, None)?;
     println!("Reset '{}' to idle.", base);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// TOML mutation helper (extracted for testability)
+// ---------------------------------------------------------------------------
+
+/// Append a new `[[projects.worktrees]]` entry to the TOML document string.
+///
+/// Finds the `[[projects]]` block whose `short` key matches `project_short`
+/// (case-insensitive) and pushes a new worktree entry with the given name.
+/// Returns the updated TOML as a `String`.
+fn append_worktree_to_toml(
+    toml_str: &str,
+    project_short: &str,
+    worktree_name: &str,
+) -> Result<String> {
+    let mut doc = toml_str
+        .parse::<DocumentMut>()
+        .context("Failed to parse task-master.toml")?;
+
+    let projects = doc["projects"]
+        .as_array_of_tables_mut()
+        .context("Missing [[projects]] in task-master.toml")?;
+
+    let proj_entry = projects
+        .iter_mut()
+        .find(|p| {
+            p.get("short")
+                .and_then(|v| v.as_str())
+                .map(|s| s.eq_ignore_ascii_case(project_short))
+                .unwrap_or(false)
+        })
+        .with_context(|| format!("Project '{}' not found in config file", project_short))?;
+
+    let worktrees = proj_entry
+        .entry("worktrees")
+        .or_insert(Item::ArrayOfTables(toml_edit::ArrayOfTables::new()))
+        .as_array_of_tables_mut()
+        .context("worktrees is not an array of tables")?;
+
+    let mut new_wt = Table::new();
+    new_wt.insert("name", value(worktree_name));
+    worktrees.push(new_wt);
+
+    Ok(doc.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // append_worktree_to_toml
+    // -------------------------------------------------------------------------
+
+    const BASE_TOML: &str = r#"[[projects]]
+name = "warehouse-integration-service"
+short = "WIS"
+repo = "projects/warehouse-integration-service"
+
+[[projects.worktrees]]
+name = "olive"
+"#;
+
+    #[test]
+    fn test_append_worktree_adds_new_entry() {
+        let result = append_worktree_to_toml(BASE_TOML, "WIS", "cedar").unwrap();
+        // The new worktree must appear in the output.
+        assert!(result.contains("cedar"), "expected 'cedar' in:\n{}", result);
+        // The existing worktree must still be there.
+        assert!(
+            result.contains("olive"),
+            "expected 'olive' still in:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_append_worktree_is_valid_toml() {
+        let result = append_worktree_to_toml(BASE_TOML, "WIS", "cedar").unwrap();
+        // Round-trip: must parse without error and contain both worktrees.
+        let reg = registry::Registry::load_from_str(&result, PathBuf::from("/base")).unwrap();
+        let names: Vec<&str> = reg
+            .worktrees
+            .iter()
+            .map(|w| w.window_name.as_str())
+            .collect();
+        assert!(names.contains(&"WIS-olive"));
+        assert!(names.contains(&"WIS-cedar"));
+    }
+
+    #[test]
+    fn test_append_worktree_case_insensitive_project_match() {
+        // "wis" should match the project with short = "WIS".
+        let result = append_worktree_to_toml(BASE_TOML, "wis", "birch").unwrap();
+        assert!(result.contains("birch"));
+    }
+
+    #[test]
+    fn test_append_worktree_unknown_project_returns_error() {
+        let err = append_worktree_to_toml(BASE_TOML, "XYZ", "branch").unwrap_err();
+        assert!(err.to_string().contains("XYZ"));
+    }
+
+    #[test]
+    fn test_append_worktree_to_project_with_no_prior_worktrees() {
+        let toml = r#"[[projects]]
+name = "fresh-service"
+short = "FS"
+repo = "projects/fresh-service"
+"#;
+        let result = append_worktree_to_toml(toml, "FS", "main").unwrap();
+        assert!(result.contains("main"));
+        // Validate it is parseable.
+        let reg = registry::Registry::load_from_str(&result, PathBuf::from("/base")).unwrap();
+        assert_eq!(reg.worktrees.len(), 1);
+        assert_eq!(reg.worktrees[0].window_name, "FS-main");
+    }
+
+    #[test]
+    fn test_append_worktree_multiple_projects_correct_one_modified() {
+        let toml = r#"[[projects]]
+name = "alpha"
+short = "A"
+repo = "projects/alpha"
+
+[[projects.worktrees]]
+name = "existing"
+
+[[projects]]
+name = "beta"
+short = "B"
+repo = "projects/beta"
+"#;
+        let result = append_worktree_to_toml(toml, "B", "new-branch").unwrap();
+        let reg = registry::Registry::load_from_str(&result, PathBuf::from("/base")).unwrap();
+        let names: Vec<&str> = reg
+            .worktrees
+            .iter()
+            .map(|w| w.window_name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"A-existing"),
+            "A-existing should be untouched"
+        );
+        assert!(
+            names.contains(&"B-new-branch"),
+            "B-new-branch should be added"
+        );
+        assert_eq!(names.len(), 2);
+    }
+
+    #[test]
+    fn test_append_worktree_preserves_original_formatting() {
+        // Comments and blank lines that toml_edit preserves should not be clobbered.
+        let toml = "# top comment\n".to_string() + BASE_TOML;
+        let result = append_worktree_to_toml(&toml, "WIS", "branch").unwrap();
+        assert!(result.starts_with("# top comment\n"), "comment was lost");
+    }
+
+    // -------------------------------------------------------------------------
+    // Registry::load from a real file (tempdir)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_registry_load_from_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("task-master.toml");
+        std::fs::write(&config_path, BASE_TOML).unwrap();
+
+        let reg = Registry::load(dir.path().to_path_buf()).unwrap();
+        assert_eq!(reg.projects.len(), 1);
+        assert_eq!(reg.worktrees.len(), 1);
+        assert_eq!(reg.worktrees[0].window_name, "WIS-olive");
+        assert_eq!(
+            reg.worktrees[0].abs_path,
+            dir.path()
+                .join("projects/warehouse-integration-service/olive")
+        );
+    }
+
+    #[test]
+    fn test_registry_load_missing_file_returns_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // No task-master.toml written.
+        let err = Registry::load(dir.path().to_path_buf()).unwrap_err();
+        assert!(err.to_string().contains("Failed to read config"));
+    }
+
+    #[test]
+    fn test_registry_load_invalid_toml_returns_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("task-master.toml"), "not valid toml }{").unwrap();
+        let err = Registry::load(dir.path().to_path_buf()).unwrap_err();
+        assert!(err.to_string().contains("parse") || err.to_string().contains("TOML"));
+    }
+
+    #[test]
+    fn test_registry_load_duplicate_window_names_returns_error() {
+        let toml = r#"
+[[projects]]
+name = "svc"
+short = "S"
+repo = "projects/svc"
+[[projects.worktrees]]
+name = "dup"
+
+[[projects]]
+name = "other"
+short = "S"
+repo = "projects/other"
+[[projects.worktrees]]
+name = "dup"
+"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("task-master.toml"), toml).unwrap();
+        let err = Registry::load(dir.path().to_path_buf()).unwrap_err();
+        assert!(err.to_string().contains("Duplicate"));
+    }
 }

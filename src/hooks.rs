@@ -144,3 +144,172 @@ pub fn install_hook_for_single(worktree_path: &PathBuf, worktree_name: &str) -> 
     let bin = current_binary()?;
     install_hook_for_worktree(worktree_path, worktree_name, &bin)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Exercise the HOOK_TEMPLATE placeholder substitution without hitting the filesystem.
+    fn render_hook(bin: &str, worktree: &str) -> String {
+        HOOK_TEMPLATE
+            .replace("{bin}", bin)
+            .replace("{worktree}", worktree)
+    }
+
+    #[test]
+    fn test_hook_template_substitutes_bin_and_worktree() {
+        let script = render_hook("/usr/local/bin/task-master", "WIS-olive");
+        assert!(script.contains(r#"_BIN="/usr/local/bin/task-master""#));
+        assert!(script.contains(r#"_WT="WIS-olive""#));
+    }
+
+    #[test]
+    fn test_hook_template_no_leftover_placeholders() {
+        let script = render_hook("/path/to/bin", "PROJ-branch");
+        assert!(!script.contains("{bin}"));
+        assert!(!script.contains("{worktree}"));
+    }
+
+    #[test]
+    fn test_hook_template_is_bash_shebang() {
+        let script = render_hook("/bin/tm", "X-y");
+        assert!(script.starts_with("#!/usr/bin/env bash"));
+    }
+
+    #[test]
+    fn test_hook_template_uses_nohup_for_background_spawn() {
+        let script = render_hook("/bin/tm", "X-y");
+        // The QA agent must be launched in the background so the push is not blocked.
+        assert!(script.contains("nohup"));
+        assert!(script.contains("&"));
+    }
+
+    #[test]
+    fn test_hook_template_skips_delete_pushes() {
+        // A push where lsha is all-zeros is a branch deletion; the hook must skip it.
+        let script = render_hook("/bin/tm", "X-y");
+        assert!(script.contains("0000000000000000000000000000000000000000"));
+        assert!(script.contains("continue"));
+    }
+
+    #[test]
+    fn test_hook_template_calls_gh_pr_view() {
+        let script = render_hook("/bin/tm", "X-y");
+        assert!(script.contains("gh pr view"));
+    }
+
+    #[test]
+    fn test_hook_template_logs_to_tmp() {
+        let script = render_hook("/bin/tm", "X-y");
+        assert!(script.contains("/tmp/.qa-hook-"));
+    }
+
+    #[test]
+    fn test_hook_template_bin_path_with_spaces_is_quoted() {
+        // Paths with spaces must be inside double-quotes in the generated script.
+        let script = render_hook("/home/my user/bin/task-master", "WIS-olive");
+        // The _BIN variable is set with double quotes around the value.
+        assert!(script.contains(r#"_BIN="/home/my user/bin/task-master""#));
+    }
+
+    // -------------------------------------------------------------------------
+    // install_hook_for_worktree — requires a real git repo on disk
+    // -------------------------------------------------------------------------
+
+    /// Initialise a bare git repo in a tempdir and return the path.
+    fn make_bare_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let status = std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .arg(dir.path())
+            .status()
+            .expect("git init --bare");
+        assert!(status.success(), "git init --bare failed");
+        dir
+    }
+
+    #[test]
+    fn test_install_hook_writes_script_to_correct_path() {
+        let repo = make_bare_repo();
+
+        install_hook_for_worktree(
+            &repo.path().to_path_buf(),
+            "WIS-olive",
+            "/usr/local/bin/task-master",
+        )
+        .expect("install_hook_for_worktree");
+
+        let hook_path = repo.path().join("hooks/post-push");
+        assert!(
+            hook_path.exists(),
+            "hook file should exist at {:?}",
+            hook_path
+        );
+
+        let content = std::fs::read_to_string(&hook_path).unwrap();
+        assert!(content.contains(r#"_BIN="/usr/local/bin/task-master""#));
+        assert!(content.contains(r#"_WT="WIS-olive""#));
+        assert!(content.starts_with("#!/usr/bin/env bash"));
+    }
+
+    #[test]
+    fn test_install_hook_is_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repo = make_bare_repo();
+        install_hook_for_worktree(&repo.path().to_path_buf(), "WIS-olive", "/bin/task-master")
+            .expect("install_hook_for_worktree");
+
+        let hook_path = repo.path().join("hooks/post-push");
+        let meta = std::fs::metadata(&hook_path).unwrap();
+        let mode = meta.permissions().mode();
+        // owner, group, other execute bits must all be set (0o111)
+        assert_eq!(
+            mode & 0o111,
+            0o111,
+            "hook should be executable, mode={:o}",
+            mode
+        );
+    }
+
+    #[test]
+    fn test_install_hook_overwrites_existing_hook() {
+        let repo = make_bare_repo();
+        let hook_path = repo.path().join("hooks/post-push");
+
+        // Write a different hook first.
+        std::fs::create_dir_all(repo.path().join("hooks")).unwrap();
+        std::fs::write(&hook_path, "#!/bin/sh\necho old").unwrap();
+
+        install_hook_for_worktree(
+            &repo.path().to_path_buf(),
+            "PROJ-branch",
+            "/bin/task-master",
+        )
+        .expect("install_hook_for_worktree");
+
+        let content = std::fs::read_to_string(&hook_path).unwrap();
+        assert!(
+            !content.contains("echo old"),
+            "old hook should be overwritten"
+        );
+        assert!(content.contains("PROJ-branch"));
+    }
+
+    #[test]
+    fn test_install_hook_different_worktree_names_produce_distinct_scripts() {
+        let repo_a = make_bare_repo();
+        let repo_b = make_bare_repo();
+
+        install_hook_for_worktree(&repo_a.path().to_path_buf(), "PROJ-alpha", "/bin/tm").unwrap();
+        install_hook_for_worktree(&repo_b.path().to_path_buf(), "PROJ-beta", "/bin/tm").unwrap();
+
+        let script_a = std::fs::read_to_string(repo_a.path().join("hooks/post-push")).unwrap();
+        let script_b = std::fs::read_to_string(repo_b.path().join("hooks/post-push")).unwrap();
+
+        assert!(script_a.contains("PROJ-alpha"));
+        assert!(!script_a.contains("PROJ-beta"));
+        assert!(script_b.contains("PROJ-beta"));
+        assert!(!script_b.contains("PROJ-alpha"));
+    }
+}

@@ -148,3 +148,84 @@ For more details, see README.md and docs/QUICKSTART.md.
 - If push fails, resolve and retry until it succeeds
 
 <!-- END BEADS INTEGRATION -->
+
+## PR Workflow & QA Agent
+
+task-master includes an automated QA agent loop that runs between an agent opening a PR and humans reviewing it.
+
+### Full workflow
+
+```
+Agent does work on a worktree
+  -> window:  WIS-olive:dev
+  -> opens PR:  gh pr create --label wip --title "..." --body "..."
+  -> pushes branch
+  -> post-push hook fires automatically
+  -> task-master qa <worktree> <pr-number>  (non-blocking)
+  -> SAME window renamed WIS-olive:qa, fresh opencode TUI starts with QA prompt
+
+QA agent (up to 3 iterations):
+  1. Self-reviews the diff
+  2. Reads and resolves bot/reviewer comments
+  3. Checks CI status; fixes failures
+  4. Pushes fixes, waits 90s, re-checks
+
+When clean:
+  -> window renamed WIS-olive:review
+  -> Posts "Ready for human review" comment on the PR
+  -> Removes the 'wip' label
+  -> opencode TUI stays open — human can read summary and give follow-up instructions
+
+If stuck after 3 iterations:
+  -> window renamed WIS-olive:blocked
+  -> Posts escalation comment listing what needs human input
+  -> Leaves 'wip' label on
+  -> opencode TUI stays open — human can read what was tried and intervene
+
+Human reviews and merges.
+```
+
+### Setup (one-time per machine)
+
+**1. Ensure the `wip` label exists on each GitHub repo:**
+```bash
+gh label create wip --color E4E669 --description "Work in progress, QA agent running"
+```
+
+**2. Install post-push hooks into all registered worktrees:**
+```bash
+task-master install-qa-hooks
+```
+
+This is also done automatically when you run `task-master add-worktree`.
+
+### Manual QA trigger
+
+If you want to trigger the QA agent manually (e.g. for a PR that already exists):
+```bash
+task-master qa <worktree> <pr-number>
+# Example:
+task-master qa WIS-olive 42
+```
+
+### Rules for agents opening PRs
+
+- Always add `--label wip` when creating a PR:
+  ```bash
+  gh pr create --label wip --title "feat: add X" --body "..."
+  ```
+- Never remove the `wip` label yourself — the QA agent owns that.
+- The QA agent will push `qa:` prefixed commits directly to your branch; do not rebase while it is running.
+
+### QA agent tmux window lifecycle
+
+Each worktree window has a single lifecycle — no separate QA window is created:
+
+```
+WIS-olive:dev     <- agent works here
+WIS-olive:qa      <- QA agent runs here (same window, fresh opencode session)
+WIS-olive:review  <- QA complete, opencode TUI stays open for human review
+WIS-olive:blocked <- QA escalated, opencode TUI stays open for human intervention
+```
+
+When making follow-up instructions after QA completes, just type in the window directly.

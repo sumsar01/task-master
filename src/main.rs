@@ -61,6 +61,11 @@ enum Commands {
     },
     /// Install QA post-push git hooks into all registered worktrees
     InstallQaHooks,
+    /// Reset a worktree window's phase indicator back to idle
+    Reset {
+        /// Worktree window name, e.g. WIS-olive (with or without phase suffix)
+        worktree: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -99,6 +104,7 @@ fn main() -> Result<()> {
                     pr_number,
                 } => qa::cmd_qa(&registry, &worktree, pr_number),
                 Commands::InstallQaHooks => hooks::cmd_install_qa_hooks(&registry),
+                Commands::Reset { worktree } => cmd_reset(&worktree),
                 Commands::AddProject { .. } => unreachable!(),
             }
         }
@@ -320,5 +326,17 @@ fn cmd_add_project(base_dir: &PathBuf, name: &str, short: &str, url: &str) -> Re
         name, short, short
     );
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// reset
+// ---------------------------------------------------------------------------
+
+fn cmd_reset(worktree: &str) -> Result<()> {
+    let session = tmux::current_session()?;
+    let base = tmux::base_window_name(worktree);
+    tmux::set_window_phase(&session, base, None)?;
+    println!("Reset '{}' to idle.", base);
     Ok(())
 }

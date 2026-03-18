@@ -5,27 +5,44 @@ use tracing::info;
 
 /// Build the inline QA loop prompt passed to the opencode agent.
 ///
-/// The prompt is self-contained so the agent doesn't need to discover any
-/// external instructions file — it starts with fresh context and full
-/// instructions every time.
-pub fn build_qa_prompt(repo: &str, branch: &str, pr_number: u64) -> String {
-    let handoff_body = format!(
-        "QA agent summary\\n\\nCompleted QA review. Here is what was done:\\n\
+/// `session` and `dev_window` are injected so the agent can update the tmux
+/// window name to reflect its current phase without any external tooling.
+pub fn build_qa_prompt(
+    repo: &str,
+    branch: &str,
+    pr_number: u64,
+    session: &str,
+    dev_window: &str, // base name, e.g. "WIS-olive"
+) -> String {
+    // The QA agent lives in window "<dev_window>-qa" and uses tmux rename-window
+    // (by index) to update the dev window's phase suffix.
+    // We tell the agent to run `tmux list-windows` to find the dev window index,
+    // then rename it — this avoids colon-in-target ambiguity.
+    let rename_cmd = format!(
+        "tmux list-windows -t {session} -F '#{{window_index}} #{{window_name}}' \
+         | awk -F'[ :]' '$2==\"{base}\" {{print $1}}' \
+         | xargs -I{{}} tmux rename-window -t {session}:{{}}",
+        session = session,
+        base = dev_window,
+    );
+
+    let handoff_rename = format!("{} '{base}:review'", rename_cmd, base = dev_window);
+    let escalation_rename = format!("{} '{base}:blocked'", rename_cmd, base = dev_window);
+
+    let handoff_body = "QA agent summary\\n\\nCompleted QA review. Here is what was done:\\n\
          - [list fixes applied]\\n\
          - [list comments resolved]\\n\
          - [anything left for humans]\\n\\n\
-         Ready for human review."
-    );
-    let escalation_body = format!(
-        "QA agent escalation\\n\\nAfter 3 iterations I was unable to fully resolve all issues. \
-         Human input needed:\\n\\n\
+         Ready for human review.";
+
+    let escalation_body = "QA agent escalation\\n\\nAfter 3 iterations I was unable to fully \
+         resolve all issues. Human input needed:\\n\\n\
          **Remaining CI failures:**\\n\
          - [list each failing check and why you could not fix it]\\n\\n\
          **Remaining review comments needing human decision:**\\n\
          - [list each comment]\\n\\n\
          **What I did fix:**\\n\
-         - [list]"
-    );
+         - [list]";
 
     format!(
         "You are a QA agent for PR #{pr} on branch '{branch}' in repo '{repo}'.\n\
@@ -64,18 +81,21 @@ pub fn build_qa_prompt(repo: &str, branch: &str, pr_number: u64) -> String {
          \n\
          HANDOFF (all checks green, no actionable comments)\n\
          \n\
-         Post a PR comment summarising what you did:\n\
-           gh pr comment {pr} --body \"{handoff}\"\n\
-         \n\
-         Remove the wip label:\n\
-           gh pr edit {pr} --remove-label wip\n\
+         1. Rename the dev window to signal ready-for-review:\n\
+              {handoff_rename}\n\
+         2. Post a PR comment summarising what you did:\n\
+              gh pr comment {pr} --body \"{handoff_body}\"\n\
+         3. Remove the wip label:\n\
+              gh pr edit {pr} --remove-label wip\n\
          \n\
          Then stop.\n\
          \n\
          ESCALATION (after 3 iterations, still not clean)\n\
          \n\
-         Post a PR comment with a clear escalation summary:\n\
-           gh pr comment {pr} --body \"{escalation}\"\n\
+         1. Rename the dev window to signal it is blocked:\n\
+              {escalation_rename}\n\
+         2. Post a PR comment with a clear escalation summary:\n\
+              gh pr comment {pr} --body \"{escalation_body}\"\n\
          \n\
          Then stop. Do NOT remove the wip label on escalation.\n\
          \n\
@@ -89,8 +109,10 @@ pub fn build_qa_prompt(repo: &str, branch: &str, pr_number: u64) -> String {
         pr = pr_number,
         branch = branch,
         repo = repo,
-        handoff = handoff_body,
-        escalation = escalation_body,
+        handoff_rename = handoff_rename,
+        escalation_rename = escalation_rename,
+        handoff_body = handoff_body,
+        escalation_body = escalation_body,
     )
 }
 
@@ -103,19 +125,18 @@ pub fn cmd_qa(registry: &Registry, worktree_name: &str, pr_number: u64) -> Resul
         )
     })?;
 
-    // Detect the GitHub repo slug (owner/name) from the git remote inside the worktree.
     let repo_slug = detect_repo_slug(&worktree.abs_path.to_string_lossy())?;
-
-    // Detect the current branch of the worktree.
     let branch = detect_branch(&worktree.abs_path.to_string_lossy())?;
-
-    let prompt = build_qa_prompt(&repo_slug, &branch, pr_number);
-
-    // QA windows are named "<original-window>-qa", e.g. "WIS-olive-qa".
-    let qa_window_name = format!("{}-qa", worktree_name);
-    let abs_path_str = worktree.abs_path.to_string_lossy().to_string();
-
     let session = tmux::current_session()?;
+
+    // The base window name (no phase suffix), e.g. "WIS-olive"
+    let base_name = tmux::base_window_name(worktree_name).to_string();
+
+    let prompt = build_qa_prompt(&repo_slug, &branch, pr_number, &session, &base_name);
+
+    // QA windows are named "<base>-qa", e.g. "WIS-olive-qa".
+    let qa_window_name = format!("{}-qa", base_name);
+    let abs_path_str = worktree.abs_path.to_string_lossy().to_string();
 
     info!(
         "[{}] Spawning QA agent for PR #{} in session '{}', dir {}",
@@ -123,6 +144,9 @@ pub fn cmd_qa(registry: &Registry, worktree_name: &str, pr_number: u64) -> Resul
     );
 
     let is_new = tmux::spawn_window(&session, &qa_window_name, &abs_path_str, &prompt)?;
+
+    // Transition the dev window: WIS-olive:dev -> WIS-olive:qa
+    tmux::set_window_phase(&session, &base_name, Some("qa"))?;
 
     if is_new {
         println!(
@@ -221,9 +245,11 @@ mod tests {
 
     #[test]
     fn test_build_qa_prompt_contains_pr_number() {
-        let prompt = build_qa_prompt("acme/repo", "feature/foo", 42);
+        let prompt = build_qa_prompt("acme/repo", "feature/foo", 42, "mysession", "WIS-olive");
         assert!(prompt.contains("PR #42"));
         assert!(prompt.contains("feature/foo"));
         assert!(prompt.contains("acme/repo"));
+        assert!(prompt.contains("WIS-olive:review"));
+        assert!(prompt.contains("WIS-olive:blocked"));
     }
 }

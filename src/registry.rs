@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
+use toml_edit::DocumentMut;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct WorktreeConfig {
@@ -92,8 +93,22 @@ impl Registry {
     }
 
     /// Find a worktree by window name (e.g. "WIS-olive").
+    ///
+    /// Any phase suffix (e.g. ":dev", ":qa") is stripped before lookup so that
+    /// "WIS-olive:dev" and "WIS-olive" both find the same worktree.
     pub fn find_worktree(&self, window_name: &str) -> Option<&Worktree> {
-        self.worktrees.iter().find(|w| w.window_name == window_name)
+        let base = window_name.split(':').next().unwrap_or(window_name);
+        self.worktrees.iter().find(|w| w.window_name == base)
+    }
+
+    /// Find a worktree by window name, returning a descriptive error if not found.
+    pub fn require_worktree(&self, window_name: &str) -> Result<&Worktree> {
+        self.find_worktree(window_name).with_context(|| {
+            format!(
+                "Worktree '{}' not found. Run `task-master list` to see available worktrees.",
+                window_name
+            )
+        })
     }
 
     /// Find a project by short name (case-insensitive).
@@ -113,6 +128,61 @@ impl Registry {
         }
         Ok(())
     }
+}
+
+/// Remove a `[[projects.worktrees]]` entry from the TOML document string.
+///
+/// Finds the `[[projects]]` block whose `short` key matches `project_short`
+/// (case-insensitive) and removes the worktree entry whose `name` matches
+/// `worktree_name`. Returns the updated TOML as a `String`.
+///
+/// Returns an error if the project or worktree is not found.
+pub fn remove_worktree_from_toml(
+    toml_str: &str,
+    project_short: &str,
+    worktree_name: &str,
+) -> Result<String> {
+    let mut doc = toml_str
+        .parse::<DocumentMut>()
+        .context("Failed to parse task-master.toml")?;
+
+    let projects = doc["projects"]
+        .as_array_of_tables_mut()
+        .context("Missing [[projects]] in task-master.toml")?;
+
+    let proj_entry = projects
+        .iter_mut()
+        .find(|p| {
+            p.get("short")
+                .and_then(|v| v.as_str())
+                .map(|s| s.eq_ignore_ascii_case(project_short))
+                .unwrap_or(false)
+        })
+        .with_context(|| format!("Project '{}' not found in config file", project_short))?;
+
+    let worktrees = proj_entry
+        .get_mut("worktrees")
+        .and_then(|w| w.as_array_of_tables_mut())
+        .with_context(|| format!("No worktrees found for project '{}'", project_short))?;
+
+    // Find the index of the worktree to remove.
+    let idx = worktrees
+        .iter()
+        .position(|w| {
+            w.get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s == worktree_name)
+                .unwrap_or(false)
+        })
+        .with_context(|| {
+            format!(
+                "Worktree '{}' not found in project '{}'",
+                worktree_name, project_short
+            )
+        })?;
+
+    worktrees.remove(idx);
+    Ok(doc.to_string())
 }
 
 #[cfg(test)]
@@ -169,6 +239,30 @@ name = "main"
         let reg = registry_from_toml(SIMPLE_TOML).unwrap();
         assert!(reg.find_worktree("wis-olive").is_none());
         assert!(reg.find_worktree("WIS-Olive").is_none());
+    }
+
+    #[test]
+    fn test_find_worktree_strips_dev_phase_suffix() {
+        let reg = registry_from_toml(SIMPLE_TOML).unwrap();
+        let wt = reg.find_worktree("WIS-olive:dev");
+        assert!(wt.is_some(), "WIS-olive:dev should resolve to WIS-olive");
+        assert_eq!(wt.unwrap().window_name, "WIS-olive");
+    }
+
+    #[test]
+    fn test_find_worktree_strips_blocked_phase_suffix() {
+        let reg = registry_from_toml(SIMPLE_TOML).unwrap();
+        let wt = reg.find_worktree("WIS-olive:blocked");
+        assert!(wt.is_some());
+        assert_eq!(wt.unwrap().window_name, "WIS-olive");
+    }
+
+    #[test]
+    fn test_find_worktree_strips_qa_phase_suffix() {
+        let reg = registry_from_toml(SIMPLE_TOML).unwrap();
+        let wt = reg.find_worktree("OTH-main:qa");
+        assert!(wt.is_some());
+        assert_eq!(wt.unwrap().window_name, "OTH-main");
     }
 
     #[test]
@@ -256,5 +350,48 @@ repo = "projects/empty-service"
         assert!(names.contains(&"WIS-cedar"));
         assert!(names.contains(&"OTH-main"));
         assert_eq!(names.len(), 3);
+    }
+
+    // -------------------------------------------------------------------------
+    // remove_worktree_from_toml
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_remove_worktree_removes_existing_entry() {
+        let result = super::remove_worktree_from_toml(SIMPLE_TOML, "WIS", "olive").unwrap();
+        // olive must be gone
+        let reg = Registry::load_from_str(&result, PathBuf::from("/base")).unwrap();
+        let names: Vec<&str> = reg
+            .worktrees
+            .iter()
+            .map(|w| w.window_name.as_str())
+            .collect();
+        assert!(!names.contains(&"WIS-olive"), "olive should be removed");
+        // cedar and OTH-main must survive
+        assert!(names.contains(&"WIS-cedar"), "cedar should remain");
+        assert!(names.contains(&"OTH-main"), "OTH-main should remain");
+    }
+
+    #[test]
+    fn test_remove_worktree_unknown_worktree_returns_error() {
+        let err = super::remove_worktree_from_toml(SIMPLE_TOML, "WIS", "doesnotexist").unwrap_err();
+        assert!(
+            err.to_string().contains("doesnotexist"),
+            "error should mention the missing name"
+        );
+    }
+
+    #[test]
+    fn test_remove_worktree_unknown_project_returns_error() {
+        let err = super::remove_worktree_from_toml(SIMPLE_TOML, "XYZ", "olive").unwrap_err();
+        assert!(err.to_string().contains("XYZ"));
+    }
+
+    #[test]
+    fn test_remove_worktree_result_is_valid_toml() {
+        let result = super::remove_worktree_from_toml(SIMPLE_TOML, "WIS", "cedar").unwrap();
+        // Must parse without error.
+        let reg = Registry::load_from_str(&result, PathBuf::from("/base")).unwrap();
+        assert_eq!(reg.worktrees.len(), 2); // olive + OTH-main remain
     }
 }

@@ -16,7 +16,7 @@ fn tmux(args: &[&str]) -> Result<String> {
 /// Return the name of the current tmux session, or error if not inside tmux.
 pub fn current_session() -> Result<String> {
     std::env::var("TMUX")
-        .context("Not inside a tmux session. task-master spawn must be run from within tmux.")?;
+        .context("This task-master command must be run from within a tmux session.")?;
     tmux(&["display-message", "-p", "#S"]).context("Failed to get current tmux session name")
 }
 
@@ -28,7 +28,7 @@ pub fn base_window_name(name: &str) -> &str {
 
 /// Find the index of the window whose name starts with `base_name` (before any colon)
 /// in the given session. Returns None if not found.
-fn find_window_index(session: &str, base_name: &str) -> Option<String> {
+pub fn find_window_index(session: &str, base_name: &str) -> Option<String> {
     // list-windows -F "#{window_index} #{window_name}"
     let output = Command::new("tmux")
         .args([
@@ -99,16 +99,17 @@ pub fn set_window_phase(session: &str, base_name: &str, phase: Option<&str>) -> 
 }
 
 /// Interrupt whatever is running in an existing window and start a fresh
-/// opencode TUI with the given prompt.
+/// opencode session with the given prompt.
 ///
 /// Sends C-c twice (to reliably exit the opencode TUI), waits briefly, then
-/// runs `opencode --prompt <prompt>` in the same window. The window is
-/// identified by its base name (prefix before any ':').
+/// runs `opencode run [--agent <agent>] <prompt>` in the same window. The
+/// window is identified by its base name (prefix before any ':').
 pub fn replace_window_process(
     session: &str,
     base_name: &str,
     working_dir: &str,
     prompt: &str,
+    agent: Option<&str>,
 ) -> Result<()> {
     let idx = find_window_index(session, base_name).with_context(|| {
         format!(
@@ -125,11 +126,8 @@ pub fn replace_window_process(
     std::thread::sleep(std::time::Duration::from_millis(500));
 
     // cd to working dir then launch fresh opencode TUI with the prompt.
-    let cmd = format!(
-        "cd {} && opencode --prompt {}",
-        shell_escape(working_dir),
-        shell_escape(prompt)
-    );
+    let opencode_cmd = build_opencode_cmd(prompt, agent);
+    let cmd = format!("cd {} && {}", shell_escape(working_dir), opencode_cmd);
     tmux(&["send-keys", "-t", &target, &cmd])?;
     tmux(&["send-keys", "-t", &target, "Enter"])?;
 
@@ -139,6 +137,8 @@ pub fn replace_window_process(
 /// Spawn an opencode agent for a worktree.
 ///
 /// `window_name` must be the **base** name (no phase suffix), e.g. "WIS-olive".
+/// `agent` is an optional opencode agent name (e.g. `"plan"`, `"build"`). When
+/// `None` the opencode default agent is used.
 ///
 /// - If a window with that base name already exists (regardless of phase suffix):
 ///   send the prompt to the running opencode session and return false.
@@ -148,6 +148,7 @@ pub fn spawn_window(
     window_name: &str,
     working_dir: &str,
     prompt: &str,
+    agent: Option<&str>,
 ) -> Result<bool> {
     // Look up by base name so we find it even if it already has a phase suffix.
     if let Some(idx) = find_window_index(session, window_name) {
@@ -160,7 +161,7 @@ pub fn spawn_window(
     // New window — always created with the :dev phase suffix.
     let initial_name = format!("{}:dev", window_name);
     let end_target = format!("{}:", session);
-    let opencode_cmd = format!("opencode --prompt {}", shell_escape(prompt));
+    let opencode_cmd = build_opencode_cmd(prompt, agent);
     tmux(&[
         "new-window",
         "-d", // don't switch to it
@@ -182,7 +183,65 @@ pub fn spawn_window(
     Ok(true) // true = new window
 }
 
-fn shell_escape(s: &str) -> String {
+/// Spawn or replace a named tmux window running an arbitrary shell command.
+///
+/// Used for utility windows like `supervisor` where the caller needs full control
+/// over what runs in the window (e.g. a `while true` polling loop). If a window
+/// with `name` already exists it is replaced (current process killed, fresh
+/// command started). Otherwise a new window is created.
+///
+/// `cmd` is the raw shell command to execute (not escaped further).
+pub fn spawn_named_window_raw(
+    session: &str,
+    name: &str,
+    working_dir: &str,
+    cmd: &str,
+) -> Result<()> {
+    // Kill any existing window with this name outright — sending C-c to a
+    // `while true` shell loop is unreliable because SIGINT propagates to the
+    // entire process group and can leave the shell in an indeterminate state.
+    // A fresh window is always clean.
+    if let Some(idx) = find_window_index(session, name) {
+        let target = format!("{}:{}", session, idx);
+        let _ = tmux(&["kill-window", "-t", &target]);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+
+    let end_target = format!("{}:", session);
+    tmux(&[
+        "new-window",
+        "-d",
+        "-t",
+        &end_target,
+        "-n",
+        name,
+        "-c",
+        working_dir,
+    ])?;
+    let idx = find_window_index(session, name)
+        .with_context(|| format!("Could not find newly created window '{}'", name))?;
+    let target = format!("{}:{}", session, idx);
+    tmux(&["send-keys", "-t", &target, cmd])?;
+    tmux(&["send-keys", "-t", &target, "Enter"])?;
+
+    Ok(())
+}
+
+/// Build the opencode launch command string with optional agent and prompt flags.
+///
+/// Launches the interactive opencode TUI (`opencode --prompt <msg>`) so the
+/// agent runs in a visible, human-inspectable session. The `--prompt` flag
+/// auto-submits the first message without requiring a keypress.
+fn build_opencode_cmd(prompt: &str, agent: Option<&str>) -> String {
+    let mut cmd = String::from("opencode");
+    if let Some(a) = agent {
+        cmd.push_str(&format!(" --agent {}", shell_escape(a)));
+    }
+    cmd.push_str(&format!(" --prompt {}", shell_escape(prompt)));
+    cmd
+}
+
+pub fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
@@ -312,5 +371,33 @@ mod tests {
         let input = "line1\nline2\ttabbed";
         let escaped = shell_escape(input);
         assert_eq!(bash_eval(&escaped).unwrap(), input);
+    }
+
+    // -------------------------------------------------------------------------
+    // build_opencode_cmd
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_build_opencode_cmd_no_agent() {
+        let cmd = build_opencode_cmd("do something", None);
+        assert_eq!(cmd, "opencode --prompt 'do something'");
+        assert!(!cmd.contains("--agent"));
+    }
+
+    #[test]
+    fn test_build_opencode_cmd_with_agent() {
+        let cmd = build_opencode_cmd("plan this", Some("plan"));
+        assert!(cmd.contains("--agent 'plan'"), "got: {}", cmd);
+        assert!(cmd.contains("--prompt 'plan this'"), "got: {}", cmd);
+        // agent flag must come before prompt
+        let agent_pos = cmd.find("--agent").unwrap();
+        let prompt_pos = cmd.find("--prompt").unwrap();
+        assert!(agent_pos < prompt_pos);
+    }
+
+    #[test]
+    fn test_build_opencode_cmd_with_build_agent() {
+        let cmd = build_opencode_cmd("implement x", Some("build"));
+        assert!(cmd.contains("--agent 'build'"), "got: {}", cmd);
     }
 }

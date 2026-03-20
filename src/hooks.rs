@@ -1,4 +1,5 @@
 use crate::registry::Registry;
+use crate::tmux;
 use anyhow::{Context, Result};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -8,20 +9,34 @@ use tracing::info;
 /// The post-push hook script template.
 ///
 /// Placeholders:
-///   {bin}          – absolute path to the task-master binary
-///   {worktree}     – e.g. "WIS-olive"
+///   {bin}   – absolute path to the task-master binary
+///   {short} – project short name, e.g. "WIS"
+///
+/// The worktree name is derived at runtime from `$GIT_DIR` (which git sets to
+/// the worktree-specific git dir, e.g. `.../worktrees/olive`). Taking its
+/// basename gives the worktree leaf name; combined with the project short name
+/// this reconstructs the full window name without needing one hook per worktree.
 ///
 /// The generated script intentionally contains no references to "task-master"
 /// so that it does not reveal tooling details to anyone who inspects the hook.
 const HOOK_TEMPLATE: &str = r#"#!/usr/bin/env bash
 set -euo pipefail
 
-_BIN="{bin}"
-_WT="{worktree}"
+_BIN={bin}
+_SHORT="{short}"
+
+# Derive the worktree leaf name from $GIT_DIR at runtime.
+# For a linked worktree GIT_DIR is .../worktrees/<name>; basename gives <name>.
+# Fall back to "main" if GIT_DIR is not set or points to the bare repo itself.
+_leaf=$(basename "${GIT_DIR:-.}")
+if [ "$_leaf" = "." ] || [ "$_leaf" = "" ]; then
+    _leaf="main"
+fi
+_WT="${_SHORT}-${_leaf}"
 
 while read -r _lref _lsha _rref _rsha; do
     [ "$_lsha" = "0000000000000000000000000000000000000000" ] && continue
-    _branch="${{_rref#refs/heads/}}"
+    _branch="${_rref#refs/heads/}"
     [ "$_branch" = "$_rref" ] && continue
     command -v gh &>/dev/null || continue
     _pr=$(gh pr view "$_branch" --json number --jq '.number' 2>/dev/null || true)
@@ -31,9 +46,13 @@ done
 "#;
 
 /// Install the post-push QA hook into the git directory of the given worktree path.
+///
+/// Because all worktrees in a project share the same bare repo hooks directory,
+/// this installs a single hook that detects the worktree name at runtime from
+/// `$GIT_DIR`. Only the project short name needs to be embedded.
 fn install_hook_for_worktree(
     worktree_path: &PathBuf,
-    worktree_name: &str,
+    project_short: &str,
     task_master_bin: &str,
 ) -> Result<()> {
     // For a git worktree the hooks live in the *main* repo's .git/hooks, not
@@ -48,9 +67,22 @@ fn install_hook_for_worktree(
 
     let hook_path = hooks_dir.join("post-push");
 
+    // If a pre-existing hook is not ours (doesn't contain our sentinel), warn
+    // before overwriting so teams with their own hooks notice.
+    if hook_path.exists() {
+        let existing = fs::read_to_string(&hook_path).unwrap_or_default();
+        if !existing.contains("_BIN=") {
+            eprintln!(
+                "Warning: overwriting pre-existing post-push hook at {}",
+                hook_path.display()
+            );
+        }
+        // If it does contain _BIN= it's ours — silently upgrade.
+    }
+
     let script = HOOK_TEMPLATE
-        .replace("{bin}", task_master_bin)
-        .replace("{worktree}", worktree_name);
+        .replace("{bin}", &tmux::shell_escape(task_master_bin))
+        .replace("{short}", project_short);
 
     fs::write(&hook_path, &script)
         .with_context(|| format!("Failed to write hook: {}", hook_path.display()))?;
@@ -61,12 +93,12 @@ fn install_hook_for_worktree(
 
     info!(
         "[{}] Installed post-push hook at {}",
-        worktree_name,
+        project_short,
         hook_path.display()
     );
     println!(
         "  [{}] post-push hook -> {}",
-        worktree_name,
+        project_short,
         hook_path.display()
     );
 
@@ -114,35 +146,50 @@ fn current_binary() -> Result<String> {
         .map(|p| p.to_string_lossy().to_string())
 }
 
-/// Install QA post-push hooks into every registered worktree.
+/// Install QA post-push hooks — one per project (not per worktree).
+///
+/// All worktrees in a project share the same bare repo hooks directory, so
+/// installing once per project is sufficient. The hook detects the worktree
+/// name at runtime from `$GIT_DIR`.
 pub fn cmd_install_qa_hooks(registry: &Registry) -> Result<()> {
     let bin = current_binary()?;
 
     println!("Installing post-push hooks (binary: {}):", bin);
 
     let mut count = 0;
-    for wt in &registry.worktrees {
-        if !wt.abs_path.exists() {
+    for project in &registry.projects {
+        // Find any existing worktree to resolve the common git dir.
+        // If there are no worktrees, skip (hook will be installed on add-worktree).
+        let first_wt = project
+            .worktrees
+            .iter()
+            .map(|wt| registry.base_dir.join(&project.repo).join(&wt.name))
+            .find(|p| p.exists());
+
+        let Some(wt_path) = first_wt else {
             println!(
-                "  [{}] skipped (worktree directory does not exist: {})",
-                wt.window_name,
-                wt.abs_path.display()
+                "  [{}] skipped (no worktrees with existing directories found)",
+                project.short
             );
             continue;
-        }
-        install_hook_for_worktree(&wt.abs_path, &wt.window_name, &bin)?;
+        };
+
+        install_hook_for_worktree(&wt_path, &project.short, &bin)?;
         count += 1;
     }
 
-    println!("\nDone. Installed hooks in {} worktree(s).", count);
+    println!("\nDone. Installed hooks for {} project(s).", count);
 
     Ok(())
 }
 
 /// Install QA post-push hook for a single worktree (called from add-worktree).
-pub fn install_hook_for_single(worktree_path: &PathBuf, worktree_name: &str) -> Result<()> {
+///
+/// `project_short` is the project's short name (e.g. "WIS"), used as the
+/// prefix in the window name. The worktree leaf is detected at runtime.
+pub fn install_hook_for_single(worktree_path: &PathBuf, project_short: &str) -> Result<()> {
     let bin = current_binary()?;
-    install_hook_for_worktree(worktree_path, worktree_name, &bin)
+    install_hook_for_worktree(worktree_path, project_short, &bin)
 }
 
 #[cfg(test)]
@@ -150,35 +197,38 @@ mod tests {
     use super::*;
 
     /// Exercise the HOOK_TEMPLATE placeholder substitution without hitting the filesystem.
-    fn render_hook(bin: &str, worktree: &str) -> String {
+    fn render_hook(bin: &str, short: &str) -> String {
         HOOK_TEMPLATE
-            .replace("{bin}", bin)
-            .replace("{worktree}", worktree)
+            .replace("{bin}", &tmux::shell_escape(bin))
+            .replace("{short}", short)
     }
 
     #[test]
     fn test_hook_template_substitutes_bin_and_worktree() {
-        let script = render_hook("/usr/local/bin/task-master", "WIS-olive");
-        assert!(script.contains(r#"_BIN="/usr/local/bin/task-master""#));
-        assert!(script.contains(r#"_WT="WIS-olive""#));
+        let script = render_hook("/usr/local/bin/task-master", "WIS");
+        // shell_escape wraps in single quotes
+        assert!(script.contains(r#"_BIN='/usr/local/bin/task-master'"#));
+        // The worktree name is constructed dynamically at runtime from _SHORT + _leaf.
+        assert!(script.contains(r#"_SHORT="WIS""#));
+        assert!(script.contains(r#"_WT="${_SHORT}-${_leaf}""#));
     }
 
     #[test]
     fn test_hook_template_no_leftover_placeholders() {
-        let script = render_hook("/path/to/bin", "PROJ-branch");
+        let script = render_hook("/path/to/bin", "PROJ");
         assert!(!script.contains("{bin}"));
-        assert!(!script.contains("{worktree}"));
+        assert!(!script.contains("{short}"));
     }
 
     #[test]
     fn test_hook_template_is_bash_shebang() {
-        let script = render_hook("/bin/tm", "X-y");
+        let script = render_hook("/bin/tm", "X");
         assert!(script.starts_with("#!/usr/bin/env bash"));
     }
 
     #[test]
     fn test_hook_template_uses_nohup_for_background_spawn() {
-        let script = render_hook("/bin/tm", "X-y");
+        let script = render_hook("/bin/tm", "X");
         // The QA agent must be launched in the background so the push is not blocked.
         assert!(script.contains("nohup"));
         assert!(script.contains("&"));
@@ -187,29 +237,40 @@ mod tests {
     #[test]
     fn test_hook_template_skips_delete_pushes() {
         // A push where lsha is all-zeros is a branch deletion; the hook must skip it.
-        let script = render_hook("/bin/tm", "X-y");
+        let script = render_hook("/bin/tm", "X");
         assert!(script.contains("0000000000000000000000000000000000000000"));
         assert!(script.contains("continue"));
     }
 
     #[test]
     fn test_hook_template_calls_gh_pr_view() {
-        let script = render_hook("/bin/tm", "X-y");
+        let script = render_hook("/bin/tm", "X");
         assert!(script.contains("gh pr view"));
     }
 
     #[test]
     fn test_hook_template_logs_to_tmp() {
-        let script = render_hook("/bin/tm", "X-y");
+        let script = render_hook("/bin/tm", "X");
         assert!(script.contains("/tmp/.qa-hook-"));
     }
 
     #[test]
     fn test_hook_template_bin_path_with_spaces_is_quoted() {
-        // Paths with spaces must be inside double-quotes in the generated script.
-        let script = render_hook("/home/my user/bin/task-master", "WIS-olive");
-        // The _BIN variable is set with double quotes around the value.
-        assert!(script.contains(r#"_BIN="/home/my user/bin/task-master""#));
+        // Paths with spaces must be shell-escaped (single-quoted) in the generated script.
+        let script = render_hook("/home/my user/bin/task-master", "WIS");
+        // shell_escape produces single-quoted output
+        assert!(script.contains(r#"_BIN='/home/my user/bin/task-master'"#));
+    }
+
+    #[test]
+    fn test_hook_bin_path_with_single_quote_is_escaped() {
+        // Paths containing a single quote must use the '\'' escape sequence.
+        let script = render_hook("/home/o'brien/bin/tm", "WIS");
+        assert!(
+            script.contains(r#"_BIN='/home/o'\''brien/bin/tm'"#),
+            "single quote in bin path should be escaped as '\\'':\n{}",
+            script
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -234,7 +295,7 @@ mod tests {
 
         install_hook_for_worktree(
             &repo.path().to_path_buf(),
-            "WIS-olive",
+            "WIS",
             "/usr/local/bin/task-master",
         )
         .expect("install_hook_for_worktree");
@@ -247,8 +308,10 @@ mod tests {
         );
 
         let content = std::fs::read_to_string(&hook_path).unwrap();
-        assert!(content.contains(r#"_BIN="/usr/local/bin/task-master""#));
-        assert!(content.contains(r#"_WT="WIS-olive""#));
+        assert!(content.contains(r#"_BIN='/usr/local/bin/task-master'"#));
+        // The short name is embedded; the full window name is constructed at runtime.
+        assert!(content.contains(r#"_SHORT="WIS""#));
+        assert!(content.contains(r#"_WT="${_SHORT}-${_leaf}""#));
         assert!(content.starts_with("#!/usr/bin/env bash"));
     }
 

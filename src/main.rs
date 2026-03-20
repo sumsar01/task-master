@@ -1,6 +1,9 @@
 mod hooks;
+mod plan;
 mod qa;
 mod registry;
+mod status;
+mod supervise;
 mod tmux;
 
 use anyhow::{bail, Context, Result};
@@ -29,6 +32,13 @@ enum Commands {
         /// Worktree window name, e.g. WIS-olive
         worktree: String,
         /// Prompt / task description to pass to the agent
+        prompt: String,
+    },
+    /// Spawn a planning agent to decompose a task into beads issues
+    Plan {
+        /// Worktree window name, e.g. WIS-olive
+        worktree: String,
+        /// Task description to plan
         prompt: String,
     },
     /// List all configured projects and worktrees
@@ -66,6 +76,18 @@ enum Commands {
         /// Worktree window name, e.g. WIS-olive (with or without phase suffix)
         worktree: String,
     },
+    /// Start the supervisor agent that monitors all worktree windows
+    Supervise,
+    /// Show status of all registered worktrees with their live tmux phase
+    Status,
+    /// Remove a worktree from the registry and from git
+    RemoveWorktree {
+        /// Worktree window name, e.g. WIS-olive
+        worktree: String,
+        /// Force removal even if a tmux window is active
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -93,6 +115,9 @@ fn main() -> Result<()> {
             let registry = Registry::load(base_dir.clone()).context("Failed to load registry")?;
             match cli.command {
                 Commands::Spawn { worktree, prompt } => cmd_spawn(&registry, &worktree, &prompt),
+                Commands::Plan { worktree, prompt } => {
+                    plan::cmd_plan(&registry, &worktree, &prompt)
+                }
                 Commands::List => cmd_list(&registry),
                 Commands::AddWorktree {
                     project,
@@ -105,6 +130,11 @@ fn main() -> Result<()> {
                 } => qa::cmd_qa(&registry, &worktree, pr_number),
                 Commands::InstallQaHooks => hooks::cmd_install_qa_hooks(&registry),
                 Commands::Reset { worktree } => cmd_reset(&worktree),
+                Commands::Supervise => supervise::cmd_supervise(&registry),
+                Commands::Status => status::cmd_status(&registry),
+                Commands::RemoveWorktree { worktree, force } => {
+                    cmd_remove_worktree(&registry, &base_dir, &worktree, force)
+                }
                 Commands::AddProject { .. } => unreachable!(),
             }
         }
@@ -116,12 +146,7 @@ fn main() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn cmd_spawn(registry: &Registry, window_name: &str, prompt: &str) -> Result<()> {
-    let worktree = registry.find_worktree(window_name).with_context(|| {
-        format!(
-            "Worktree '{}' not found. Run `task-master list` to see available worktrees.",
-            window_name
-        )
-    })?;
+    let worktree = registry.require_worktree(window_name)?;
 
     let session = tmux::current_session()?;
     let abs_path_str = worktree.abs_path.to_string_lossy().to_string();
@@ -131,12 +156,31 @@ fn cmd_spawn(registry: &Registry, window_name: &str, prompt: &str) -> Result<()>
         window_name, session, abs_path_str
     );
 
-    let is_new = tmux::spawn_window(&session, window_name, &abs_path_str, prompt)?;
+    let base_name = tmux::base_window_name(window_name);
+
+    let is_new = if tmux::find_window_index(&session, base_name).is_none() {
+        // No window yet — create it fresh.
+        tmux::spawn_window(&session, window_name, &abs_path_str, prompt, None)?;
+        true
+    } else {
+        // Window already exists (possibly in :plan, :qa, :review, or :dev phase).
+        // Always replace the running process with a fresh opencode dev session so
+        // we don't accidentally send prompts into a plan/qa agent's chat input.
+        tmux::set_window_phase(&session, base_name, Some("dev"))?;
+        tmux::replace_window_process(&session, base_name, &abs_path_str, prompt, None)?;
+        false
+    };
+
+    // Ensure :dev phase on new windows too (spawn_window sets it but be explicit).
+    tmux::set_window_phase(&session, base_name, Some("dev"))?;
 
     if is_new {
-        println!("Spawned '{}' in a new window.", window_name);
+        println!("Spawned '{}:dev' in a new window.", base_name);
     } else {
-        println!("Sent task to existing '{}' window.", window_name);
+        println!(
+            "Replaced existing '{}' window with fresh dev session (now '{}:dev').",
+            base_name, base_name
+        );
     }
 
     Ok(())
@@ -228,7 +272,9 @@ fn cmd_add_worktree(
     );
 
     // Auto-install the QA post-push hook for the new worktree.
-    match hooks::install_hook_for_single(&worktree_path, &window_name) {
+    // Pass the project short name (e.g. "WIS"), not the full window name —
+    // the hook detects the worktree leaf at runtime from $GIT_DIR.
+    match hooks::install_hook_for_single(&worktree_path, project_short) {
         Ok(()) => {}
         Err(e) => {
             // Non-fatal: warn but don't fail add-worktree.
@@ -312,6 +358,78 @@ fn cmd_reset(worktree: &str) -> Result<()> {
     let base = tmux::base_window_name(worktree);
     tmux::set_window_phase(&session, base, None)?;
     println!("Reset '{}' to idle.", base);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// remove-worktree
+// ---------------------------------------------------------------------------
+
+fn cmd_remove_worktree(
+    registry: &Registry,
+    base_dir: &PathBuf,
+    window_name: &str,
+    force: bool,
+) -> Result<()> {
+    let worktree = registry.require_worktree(window_name)?;
+    let window_base = tmux::base_window_name(window_name);
+
+    // If a tmux window is active for this worktree and --force is not set, refuse.
+    if let Ok(session) = tmux::current_session() {
+        if tmux::find_window_index(&session, window_base).is_some() && !force {
+            bail!(
+                "Window '{}' is currently active in tmux. \
+                 Stop the agent first, or pass --force to remove anyway.",
+                window_base
+            );
+        }
+    }
+
+    // Run `git worktree remove [--force] <path>` from the bare repo root.
+    // The bare repo is `base_dir/<project.repo>`.
+    let project = registry
+        .find_project(&worktree.project_short)
+        .with_context(|| format!("Project '{}' not found", worktree.project_short))?;
+    let repo_path = base_dir.join(&project.repo);
+
+    let mut git_args = vec!["worktree", "remove"];
+    if force {
+        git_args.push("--force");
+    }
+    let abs_path_str = worktree.abs_path.to_string_lossy().to_string();
+    git_args.push(&abs_path_str);
+
+    info!(
+        "Running: git -C {} worktree remove {}",
+        repo_path.display(),
+        abs_path_str
+    );
+    let git_status = Command::new("git")
+        .arg("-C")
+        .arg(&repo_path)
+        .args(&git_args)
+        .status()
+        .context("Failed to run git worktree remove")?;
+
+    if !git_status.success() {
+        bail!("git worktree remove failed");
+    }
+
+    // Remove the entry from task-master.toml.
+    let config_path = base_dir.join("task-master.toml");
+    let contents =
+        std::fs::read_to_string(&config_path).context("Failed to read task-master.toml")?;
+    let new_toml = registry::remove_worktree_from_toml(
+        &contents,
+        &worktree.project_short,
+        &worktree
+            .window_name
+            .trim_start_matches(&format!("{}-", worktree.project_short)),
+    )
+    .context("Failed to update task-master.toml")?;
+    std::fs::write(&config_path, new_toml)?;
+
+    println!("Removed worktree '{}'.", window_base);
     Ok(())
 }
 

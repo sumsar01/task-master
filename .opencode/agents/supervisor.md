@@ -99,12 +99,34 @@ Read the pane. Determine which of these is true:
    ```
    This renames the window to `:qa` and starts the QA agent. Log it.
 
-3. **TUI idle, no PR** — TUI is visible and idle at the input prompt but there is no
-   PR URL and no conclusory "all done" summary → **leave it alone**. The agent
-   completed a sub-task and is waiting for the next prompt. Do NOT rename to stalled.
+3. **TUI idle, no PR in pane** — TUI is visible and idle at the input prompt but there is no
+   PR URL and no conclusory "all done" summary → check GitHub directly using the worktree's
+   current branch:
+   ```bash
+   _branch=$(git -C <worktree-path> rev-parse --abbrev-ref HEAD 2>/dev/null)
+   _pr=$(gh pr list --head "$_branch" --state open --json number --jq '.[0].number' 2>/dev/null)
+   ```
+   - If `$_pr` is non-empty → a PR already exists that the pane scrolled past. Spawn QA:
+     ```bash
+     $TASK_MASTER qa <base-name> $_pr
+     ```
+     Log it.
+   - If `$_pr` is empty → agent completed a sub-task and is waiting for the next prompt.
+     **Leave it alone.** Do NOT rename to stalled.
 
 4. **Shell prompt, no TUI** — the opencode process has exited (shell prompt visible,
-   no TUI chrome) → rename to `:dev-stalled`, log it.
+   no TUI chrome) → check GitHub for an open PR on the current branch before deciding:
+   ```bash
+   _branch=$(git -C <worktree-path> rev-parse --abbrev-ref HEAD 2>/dev/null)
+   _pr=$(gh pr list --head "$_branch" --state open --json number --jq '.[0].number' 2>/dev/null)
+   ```
+   - If `$_pr` is non-empty → the agent finished cleanly and created a PR; the TUI exited
+     normally. Spawn QA:
+     ```bash
+     $TASK_MASTER qa <base-name> $_pr
+     ```
+     Log it.
+   - If `$_pr` is empty → rename to `:dev-stalled`, log it.
 
 ### :qa windows
 

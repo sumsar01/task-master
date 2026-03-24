@@ -157,11 +157,39 @@ fn main() -> Result<()> {
 // spawn
 // ---------------------------------------------------------------------------
 
+fn build_spawn_prompt(window_name: &str, user_prompt: &str) -> String {
+    let base_name = tmux::base_window_name(window_name);
+    format!(
+        "{user_prompt}
+
+## PR workflow (MANDATORY)
+
+When you are ready to open a PR, you MUST follow these steps in order:
+
+1. Push the branch explicitly:
+   git push origin HEAD
+
+2. Open the PR with --no-push and --label wip:
+   gh pr create --no-push --label wip --title \"<title>\" --body \"<body>\"
+
+3. Read the PR number from the URL printed by gh pr create, then trigger QA:
+   task-master qa {base_name} <pr-number>
+
+NEVER use `gh pr create` without `--no-push` — it pushes via the GitHub API and
+bypasses the git post-push hook, so QA will never start automatically.
+NEVER skip step 3 — the QA agent does not start on its own.",
+        user_prompt = user_prompt,
+        base_name = base_name,
+    )
+}
+
 fn cmd_spawn(registry: &Registry, window_name: &str, prompt: &str) -> Result<()> {
     let worktree = registry.require_worktree(window_name)?;
 
     let session = tmux::current_session()?;
     let abs_path_str = worktree.abs_path.to_string_lossy().to_string();
+    let prompt_owned = build_spawn_prompt(window_name, prompt);
+    let prompt = prompt_owned.as_str();
 
     info!(
         "[{}] Spawning in session '{}', dir {}",

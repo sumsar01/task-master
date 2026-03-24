@@ -158,10 +158,9 @@ task-master includes an automated QA agent loop that runs between an agent openi
 ```
 Agent does work on a worktree
   -> window:  WIS-olive:dev
-  -> opens PR:  gh pr create --label wip --title "..." --body "..."
-  -> pushes branch
-  -> post-push hook fires automatically
-  -> task-master qa <worktree> <pr-number>  (non-blocking)
+  -> pushes branch:  git push origin HEAD
+  -> opens PR:  gh pr create --no-push --label wip --title "..." --body "..."
+  -> triggers QA:  task-master qa <worktree> <pr-number>  (non-blocking)
   -> SAME window renamed WIS-olive:qa, fresh opencode TUI starts with QA prompt
 
 QA agent (up to 3 iterations):
@@ -210,10 +209,18 @@ task-master qa WIS-olive 42
 
 ### Rules for agents opening PRs
 
-- Always add `--label wip` when creating a PR:
+- Always push the branch explicitly before creating the PR, then use `--no-push`:
   ```bash
-  gh pr create --label wip --title "feat: add X" --body "..."
+  git push origin HEAD
+  gh pr create --no-push --label wip --title "feat: add X" --body "..."
   ```
+  `gh pr create` (without `--no-push`) pushes via the GitHub API and bypasses the
+  git `post-push` hook entirely — QA will never start automatically if you do that.
+- After opening the PR, **always** trigger QA manually:
+  ```bash
+  task-master qa <worktree> <pr-number>
+  ```
+  Read the PR number from the `gh pr create` output (it prints the PR URL).
 - Never remove the `wip` label yourself — the QA agent owns that.
 - The QA agent will push `qa:` prefixed commits directly to your branch; do not rebase while it is running.
 

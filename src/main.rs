@@ -3,6 +3,7 @@ mod hooks;
 mod plan;
 mod qa;
 mod registry;
+mod stats;
 mod status;
 mod supervise;
 mod tmux;
@@ -88,6 +89,12 @@ enum Commands {
     Supervise,
     /// Show status of all registered worktrees with their live tmux phase
     Status,
+    /// Show token usage and cost statistics for all registered worktrees
+    Stats {
+        /// Show stats for the last N days (default: all time)
+        #[arg(long)]
+        days: Option<u32>,
+    },
     /// Remove a worktree from the registry and from git
     RemoveWorktree {
         /// Worktree window name, e.g. WIS-olive
@@ -144,6 +151,7 @@ fn main() -> Result<()> {
                 Commands::Reset { worktree } => cmd_reset(&worktree),
                 Commands::Supervise => supervise::cmd_supervise(&registry),
                 Commands::Status => status::cmd_status(&registry),
+                Commands::Stats { days } => stats::cmd_stats(&registry, days),
                 Commands::RemoveWorktree { worktree, force } => {
                     cmd_remove_worktree(&registry, &base_dir, &worktree, force)
                 }

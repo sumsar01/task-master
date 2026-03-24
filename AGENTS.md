@@ -289,6 +289,54 @@ task-master spawn WIS-olive "implement bd-42 first"
 - Each issue must be independently completable by a single dev agent.
 - Always link discovered incidental issues with `--deps discovered-from:<id>`.
 
+## E2e Agent
+
+After a deploy, use the e2e agent to run a targeted post-deploy validation against the
+live environment. The agent reads the PR diff and the codebase, generates a validation
+plan specific to that PR's changes, executes it, and can fix + redeploy up to 3
+iterations before escalating.
+
+### Command
+
+```bash
+task-master e2e <worktree> <pr-number>
+# Example:
+task-master e2e WIS-olive 42
+```
+
+This opens (or replaces) the worktree window, renames it to `<base>:e2e`, and starts
+the e2e agent inside an opencode TUI session.
+
+### Auto-detected at runtime
+
+- **AWS identity** — the agent is told it is already SSO-logged in; it auto-detects
+  the current account/role via `aws sts get-caller-identity`.
+- **kubectl context** — the agent reads `kubectl config current-context` to determine
+  which cluster to target.
+
+No extra configuration in `task-master.toml` is required.
+
+### Iteration limit
+
+The agent attempts up to **3 fix + redeploy cycles** before giving up and escalating.
+It renames the window to `:e2e-done` on success or `:e2e-blocked` on escalation.
+
+### Manual-only
+
+The e2e agent is **not triggered automatically** by the post-push hook. You must invoke
+it explicitly after a deploy completes.
+
+### E2e agent window lifecycle
+
+```
+WIS-olive              <- idle
+WIS-olive:e2e          <- e2e agent running validation
+WIS-olive:e2e-done     <- validation passed (or max iterations reached cleanly)
+WIS-olive:e2e-blocked  <- escalated; needs human input
+```
+
+---
+
 ## Supervisor Agent
 
 The supervisor monitors all worktree windows and corrects stale phase suffixes when an

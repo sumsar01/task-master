@@ -247,7 +247,7 @@ pub fn cmd_qa(registry: &Registry, worktree_name: &str, pr_number: u64) -> Resul
     Ok(())
 }
 
-fn detect_repo_slug(worktree_dir: &str) -> Result<String> {
+pub fn detect_repo_slug(worktree_dir: &str) -> Result<String> {
     let output = std::process::Command::new("git")
         .args(["-C", worktree_dir, "remote", "get-url", "origin"])
         .output()
@@ -285,7 +285,7 @@ fn parse_github_slug(url: &str) -> Option<String> {
 ///
 /// Falls back to `"master"` silently if `gh` is unavailable, the repo has no
 /// remote, or the command fails for any other reason.
-fn detect_default_branch(repo_slug: &str) -> String {
+pub fn detect_default_branch(repo_slug: &str) -> String {
     let out = std::process::Command::new("gh")
         .args([
             "repo",
@@ -328,7 +328,7 @@ fn validate_branch(raw: &str, worktree_dir: &str) -> Result<String> {
     Ok(raw.to_string())
 }
 
-fn detect_branch(worktree_dir: &str) -> Result<String> {
+pub fn detect_branch(worktree_dir: &str) -> Result<String> {
     let output = std::process::Command::new("git")
         .args(["-C", worktree_dir, "rev-parse", "--abbrev-ref", "HEAD"])
         .output()

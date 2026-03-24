@@ -54,7 +54,7 @@ For each line split on the first space: `index` and `name`.
 **Skip** windows that are:
 - Named `supervisor` (that's you)
 - Not matching any registered worktree base name
-- In phase `review`, `blocked`, `ready`, `dev-stalled`, `qa-stalled`, `plan-stalled` — terminal/human states
+- In phase `review`, `blocked`, `ready`, `dev-stalled`, `qa-stalled`, `plan-stalled`, `e2e-done`, `e2e-blocked` — terminal/human states
 - Have no phase suffix (idle, not yet started)
 
 ---
@@ -73,7 +73,7 @@ Read the output carefully. Use your judgment to determine what state the agent i
 
 **Still actively working** — the opencode TUI chrome is visible: a status bar at the bottom
 showing the model name, a footer with `ctrl+p commands`, and either a spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`)
-or `esc interrupt`. The agent is mid-task. **Leave it alone.**
+or `esc interrupt`. The agent is mid-task. **See spinner heartbeat below before skipping.**
 
 **Finished and waiting for input** — the opencode TUI is visible but the agent is sitting
 idle at the input prompt (no spinner, no running command, last content was a summary or
@@ -82,6 +82,55 @@ conclusion). The agent has completed its task and is waiting. **Act based on pha
 **Shell prompt visible, no TUI** — the opencode process exited. The last line shows a shell
 prompt (`➜`, `$`, `%`) with no opencode chrome. The agent crashed or was interrupted.
 **Act based on phase.**
+
+### Spinner heartbeat — detect and nudge stuck steps
+
+A spinning agent is not necessarily making progress. A single tool call or bash command can
+hang indefinitely while the spinner keeps running. Use a stamp file to track how long the
+spinner has been continuously running for each window.
+
+**For every window where the TUI shows a spinner:**
+
+```bash
+_stamp="/tmp/task-master-spinning-<base-name>"
+```
+
+1. If `$_stamp` does not exist:
+   ```bash
+   touch "$_stamp"
+   ```
+   First time we've seen it spinning — start the clock. Leave it alone this pass.
+
+2. If `$_stamp` exists and is **less than 10 minutes old**:
+   ```bash
+   # Check age: find returns output if file is newer than 10 min
+   find "$_stamp" -mmin -10
+   ```
+   Still within the grace period — leave it alone.
+
+3. If `$_stamp` exists and is **10 or more minutes old** (find returns nothing for -mmin -10):
+   The agent has been stuck on a single step for ≥10 minutes. Nudge it:
+   ```bash
+   tmux send-keys -t $SESSION:<index> Escape
+   sleep 0.2
+   tmux send-keys -t $SESSION:<index> Escape
+   sleep 0.2
+   tmux send-keys -t $SESSION:<index> "continue"
+   sleep 0.1
+   tmux send-keys -t $SESSION:<index> Enter
+   rm -f "$_stamp"
+   ```
+   The two `Escape` keypresses return focus to the TUI input box. `continue` is sent as a
+   new prompt to the AI — it tells the agent to keep going from where it left off in the
+   **existing session** (not a restart). Deleting the stamp resets the clock so if it gets
+   stuck again we wait another full 10 minutes before nudging again.
+   Log: `<base>: nudged stuck agent (spinner running ≥10 min), sent 'continue'`
+
+**For every window where the spinner is NOT running** (idle input prompt or shell prompt):
+```bash
+rm -f "/tmp/task-master-spinning-<base-name>" 2>/dev/null
+```
+Clear the stamp so the clock resets if the agent starts a new step later.
 
 ### :dev windows
 
@@ -153,6 +202,21 @@ Read the pane. Determine which of these is true:
    or "plan complete" → rename to `:ready`, log it.
 
 3. **Shell prompt, no TUI, or no issues created** → rename to `:plan-stalled`, log it.
+
+### :e2e windows
+
+The e2e agent is responsible for renaming its own window to `:e2e-done` or `:e2e-blocked`
+before it exits. The supervisor's only job for `:e2e` windows is to detect a **crash**
+(TUI exited without self-reporting an outcome).
+
+Read the pane. Determine which of these is true:
+
+1. **TUI still running** — TUI chrome visible (spinner or idle input prompt) →
+   apply spinner heartbeat logic as normal; leave it alone otherwise.
+
+2. **Shell prompt, no TUI** — the opencode process has exited without renaming the
+   window (it would already be `:e2e-done` or `:e2e-blocked` and thus skipped if it had) →
+   rename to `:e2e-blocked` and log it as a crash.
 
 ---
 

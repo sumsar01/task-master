@@ -1,3 +1,4 @@
+mod e2e;
 mod hooks;
 mod plan;
 mod qa;
@@ -69,6 +70,13 @@ enum Commands {
         /// GitHub PR number to review
         pr_number: u64,
     },
+    /// Spawn an e2e validation agent for a worktree's deployed PR
+    E2e {
+        /// Worktree window name, e.g. WIS-olive
+        worktree: String,
+        /// GitHub PR number to validate against staging
+        pr_number: u64,
+    },
     /// Install QA post-push git hooks into all registered worktrees
     InstallQaHooks,
     /// Reset a worktree window's phase indicator back to idle
@@ -128,6 +136,10 @@ fn main() -> Result<()> {
                     worktree,
                     pr_number,
                 } => qa::cmd_qa(&registry, &worktree, pr_number),
+                Commands::E2e {
+                    worktree,
+                    pr_number,
+                } => e2e::cmd_e2e(&registry, &worktree, pr_number),
                 Commands::InstallQaHooks => hooks::cmd_install_qa_hooks(&registry),
                 Commands::Reset { worktree } => cmd_reset(&worktree),
                 Commands::Supervise => supervise::cmd_supervise(&registry),

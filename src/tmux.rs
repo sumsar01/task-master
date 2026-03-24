@@ -119,6 +119,10 @@ pub fn replace_window_process(
     })?;
     let target = format!("{}:{}", session, idx);
 
+    // Write the prompt to a temp file so we don't send a huge/multi-line string
+    // through tmux send-keys (which would mangle it or fire premature Enters).
+    let prompt_file = write_prompt_file(prompt)?;
+
     // Two C-c presses to ensure the opencode TUI exits cleanly.
     tmux(&["send-keys", "-t", &target, "C-c"])?;
     std::thread::sleep(std::time::Duration::from_millis(200));
@@ -126,7 +130,7 @@ pub fn replace_window_process(
     std::thread::sleep(std::time::Duration::from_millis(500));
 
     // cd to working dir then launch fresh opencode TUI with the prompt.
-    let opencode_cmd = build_opencode_cmd(prompt, agent);
+    let opencode_cmd = build_opencode_cmd(&prompt_file, agent);
     let cmd = format!("cd {} && {}", shell_escape(working_dir), opencode_cmd);
     tmux(&["send-keys", "-t", &target, &cmd])?;
     tmux(&["send-keys", "-t", &target, "Enter"])?;
@@ -150,9 +154,15 @@ pub fn spawn_window(
     prompt: &str,
     agent: Option<&str>,
 ) -> Result<bool> {
+    // Write the prompt to a temp file so we don't send a huge/multi-line string
+    // through tmux send-keys (which would mangle it or fire premature Enters).
+    let prompt_file = write_prompt_file(prompt)?;
+
     // Look up by base name so we find it even if it already has a phase suffix.
     if let Some(idx) = find_window_index(session, window_name) {
         let target = format!("{}:{}", session, idx);
+        // The window already has opencode running — send the prompt text directly
+        // to its TUI input (not as a shell command).
         tmux(&["send-keys", "-t", &target, prompt])?;
         tmux(&["send-keys", "-t", &target, "Enter"])?;
         return Ok(false);
@@ -161,7 +171,7 @@ pub fn spawn_window(
     // New window — always created with the :dev phase suffix.
     let initial_name = format!("{}:dev", window_name);
     let end_target = format!("{}:", session);
-    let opencode_cmd = build_opencode_cmd(prompt, agent);
+    let opencode_cmd = build_opencode_cmd(&prompt_file, agent);
     tmux(&[
         "new-window",
         "-d", // don't switch to it
@@ -227,17 +237,33 @@ pub fn spawn_named_window_raw(
     Ok(())
 }
 
+/// Write the prompt to a temporary file and return its path.
+///
+/// Avoids the character-mangling that occurs when large, multi-line strings
+/// are sent verbatim through `tmux send-keys`. The file is named using the
+/// current PID so parallel invocations don't clobber each other.
+fn write_prompt_file(prompt: &str) -> Result<String> {
+    let path = format!("/tmp/task-master-prompt-{}.txt", std::process::id());
+    std::fs::write(&path, prompt)
+        .with_context(|| format!("Failed to write prompt temp file '{}'", path))?;
+    Ok(path)
+}
+
 /// Build the opencode launch command string with optional agent and prompt flags.
 ///
-/// Launches the interactive opencode TUI (`opencode --prompt <msg>`) so the
-/// agent runs in a visible, human-inspectable session. The `--prompt` flag
-/// auto-submits the first message without requiring a keypress.
-fn build_opencode_cmd(prompt: &str, agent: Option<&str>) -> String {
+/// `prompt_file` is the path to a temp file containing the prompt text.
+/// Using a file avoids sending large/multi-line strings through `tmux send-keys`,
+/// which can mangle them or trigger premature Enter presses on embedded newlines.
+///
+/// The command uses `"$(cat <file>)"` so the shell reads the prompt at startup.
+fn build_opencode_cmd(prompt_file: &str, agent: Option<&str>) -> String {
     let mut cmd = String::from("opencode");
     if let Some(a) = agent {
         cmd.push_str(&format!(" --agent {}", shell_escape(a)));
     }
-    cmd.push_str(&format!(" --prompt {}", shell_escape(prompt)));
+    // Double-quote the command substitution so the prompt value (which may
+    // contain spaces, newlines, single-quotes, etc.) is passed as one argument.
+    cmd.push_str(&format!(" --prompt \"$(cat {})\"", shell_escape(prompt_file)));
     cmd
 }
 
@@ -379,16 +405,23 @@ mod tests {
 
     #[test]
     fn test_build_opencode_cmd_no_agent() {
-        let cmd = build_opencode_cmd("do something", None);
-        assert_eq!(cmd, "opencode --prompt 'do something'");
+        // build_opencode_cmd now takes a prompt *file path*, not the raw prompt.
+        let cmd = build_opencode_cmd("/tmp/task-master-prompt-1.txt", None);
+        assert!(
+            cmd.contains("--prompt \"$(cat '/tmp/task-master-prompt-1.txt')\""),
+            "got: {cmd}"
+        );
         assert!(!cmd.contains("--agent"));
     }
 
     #[test]
     fn test_build_opencode_cmd_with_agent() {
-        let cmd = build_opencode_cmd("plan this", Some("plan"));
-        assert!(cmd.contains("--agent 'plan'"), "got: {}", cmd);
-        assert!(cmd.contains("--prompt 'plan this'"), "got: {}", cmd);
+        let cmd = build_opencode_cmd("/tmp/task-master-prompt-2.txt", Some("plan"));
+        assert!(cmd.contains("--agent 'plan'"), "got: {cmd}");
+        assert!(
+            cmd.contains("--prompt \"$(cat '/tmp/task-master-prompt-2.txt')\""),
+            "got: {cmd}"
+        );
         // agent flag must come before prompt
         let agent_pos = cmd.find("--agent").unwrap();
         let prompt_pos = cmd.find("--prompt").unwrap();
@@ -397,7 +430,7 @@ mod tests {
 
     #[test]
     fn test_build_opencode_cmd_with_build_agent() {
-        let cmd = build_opencode_cmd("implement x", Some("build"));
-        assert!(cmd.contains("--agent 'build'"), "got: {}", cmd);
+        let cmd = build_opencode_cmd("/tmp/task-master-prompt-3.txt", Some("build"));
+        assert!(cmd.contains("--agent 'build'"), "got: {cmd}");
     }
 }

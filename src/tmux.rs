@@ -55,6 +55,20 @@ pub fn find_window_index(session: &str, base_name: &str) -> Option<String> {
     None
 }
 
+/// Re-select the `task-master` TUI window so that spawning a new worktree
+/// window (which uses `new-window -d`) doesn't inadvertently steal focus on
+/// some tmux builds/configs.
+pub fn select_tui_window(session: &str) -> Result<()> {
+    let target = format!("{}:task-master", session);
+    tmux(&["select-window", "-t", &target]).with_context(|| {
+        format!(
+            "Failed to re-focus task-master window in session '{}'",
+            session
+        )
+    })?;
+    Ok(())
+}
+
 /// Rename a window identified by its current base name to a new full name.
 /// Looks up the window by base name (prefix before ':') to avoid tmux
 /// target-parsing ambiguity with colons in window names.

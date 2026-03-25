@@ -9,6 +9,7 @@ mod status;
 mod supervise;
 mod tmux;
 mod tui;
+mod ui;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};

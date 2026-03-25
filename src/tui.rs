@@ -1,21 +1,19 @@
-use crate::registry::{Registry, Worktree};
-use crate::stats::{fetch_stats, format_tokens, StatsRow};
+use crate::registry::Registry;
+use crate::registry::Worktree;
+use crate::stats::{fetch_stats, StatsRow};
 use crate::status::find_live_phase;
 use crate::tmux;
+use crate::ui::theme::{Theme, ALL_THEMES};
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
+        KeyModifiers,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
-    Frame, Terminal,
-};
+use ratatui::{backend::CrosstermBackend, widgets::ListState, Frame, Terminal};
 use std::{
     collections::HashMap,
     io,
@@ -27,44 +25,63 @@ use std::{
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
-enum ActionKind {
+pub enum ActionKind {
     Spawn,
     Plan,
     Qa,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum Mode {
+pub enum Mode {
     Normal,
     Prompt(ActionKind),
     /// Spawn on an active window: user confirmed once, needs Enter again to force.
     ForceConfirm,
 }
 
-struct App {
-    worktrees: Vec<Worktree>,
-    phases: Vec<String>,
-    list_state: ListState,
-    mode: Mode,
-    input_buf: String,
+pub struct App {
+    pub worktrees: Vec<Worktree>,
+    pub phases: Vec<String>,
+    pub list_state: ListState,
+    pub mode: Mode,
+    pub input_buf: String,
     /// Stats cache keyed by worktree index; filled lazily on selection change.
-    stats_cache: HashMap<usize, StatsRow>,
+    pub stats_cache: HashMap<usize, StatsRow>,
     /// Transient status message and when it was set.
-    status_msg: Option<(String, Instant)>,
-    session: String,
-    should_quit: bool,
+    pub status_msg: Option<(String, Instant)>,
+    pub session: String,
+    pub should_quit: bool,
     /// Track which index was active when we last loaded stats.
-    last_stats_idx: Option<usize>,
+    pub last_stats_idx: Option<usize>,
+
+    // ── Theme ─────────────────────────────────────────────────────────────────
+    pub theme: Theme,
+
+    /// Timestamp of the last key event — used to distinguish a deliberate Enter
+    /// from a newline that arrived as part of a paste burst.
+    pub last_key_at: Instant,
+
+    // ── Overlays ──────────────────────────────────────────────────────────────
+    pub show_theme_picker: bool,
+    pub show_help: bool,
+    pub theme_picker_cursor: usize,
+    pub theme_picker_original: Option<Theme>,
+    /// The theme id that is currently written to config (used for the ✓ in the picker).
+    pub saved_theme_id: String,
 }
 
 impl App {
-    fn new(registry: &Registry, session: String) -> Self {
+    pub fn new(registry: &Registry, session: String) -> Self {
         let worktrees = registry.worktrees.clone();
         let count = worktrees.len();
         let mut list_state = ListState::default();
         if count > 0 {
             list_state.select(Some(0));
         }
+        let theme_name = &registry.ui.theme;
+        let theme = Theme::from_name(theme_name);
+        let theme_picker_cursor = Theme::index_of(theme_name);
+
         App {
             worktrees,
             phases: vec!["?".to_string(); count],
@@ -76,25 +93,32 @@ impl App {
             session,
             should_quit: false,
             last_stats_idx: None,
+            theme,
+            show_theme_picker: false,
+            show_help: false,
+            theme_picker_cursor,
+            theme_picker_original: None,
+            saved_theme_id: theme_name.clone(),
+            last_key_at: Instant::now(),
         }
     }
 
-    fn selected(&self) -> Option<usize> {
+    pub fn selected(&self) -> Option<usize> {
         self.list_state.selected()
     }
 
-    fn selected_phase(&self) -> &str {
+    pub fn selected_phase(&self) -> &str {
         match self.selected() {
             Some(i) => self.phases.get(i).map(|s| s.as_str()).unwrap_or("?"),
             None => "?",
         }
     }
 
-    fn is_active_phase(phase: &str) -> bool {
+    pub fn is_active_phase(phase: &str) -> bool {
         !matches!(phase, "idle" | "?" | "")
     }
 
-    fn move_up(&mut self) {
+    pub fn move_up(&mut self) {
         let len = self.worktrees.len();
         if len == 0 {
             return;
@@ -104,7 +128,7 @@ impl App {
             .select(Some(if i == 0 { len - 1 } else { i - 1 }));
     }
 
-    fn move_down(&mut self) {
+    pub fn move_down(&mut self) {
         let len = self.worktrees.len();
         if len == 0 {
             return;
@@ -113,12 +137,12 @@ impl App {
         self.list_state.select(Some((i + 1) % len));
     }
 
-    fn set_status(&mut self, msg: impl Into<String>) {
+    pub fn set_status(&mut self, msg: impl Into<String>) {
         self.status_msg = Some((msg.into(), Instant::now()));
     }
 
     /// Returns the current status message if it's still within the display window.
-    fn current_status(&self) -> Option<&str> {
+    pub fn current_status(&self) -> Option<&str> {
         self.status_msg.as_ref().and_then(|(msg, at)| {
             if at.elapsed() < Duration::from_secs(4) {
                 Some(msg.as_str())
@@ -128,7 +152,7 @@ impl App {
         })
     }
 
-    fn refresh_phases(&mut self) {
+    pub fn refresh_phases(&mut self) {
         for (i, wt) in self.worktrees.iter().enumerate() {
             let phase = find_live_phase(&self.session, &wt.window_name)
                 .unwrap_or_else(|| "idle".to_string());
@@ -136,7 +160,7 @@ impl App {
         }
     }
 
-    fn load_stats_for_selected(&mut self) {
+    pub fn load_stats_for_selected(&mut self) {
         let idx = match self.selected() {
             Some(i) => i,
             None => return,
@@ -151,6 +175,53 @@ impl App {
         }
         self.last_stats_idx = Some(idx);
     }
+
+    // ── Theme picker ──────────────────────────────────────────────────────────
+
+    pub fn open_theme_picker(&mut self) {
+        self.theme_picker_original = Some(self.theme.clone());
+        self.theme_picker_cursor = Theme::index_of(
+            ALL_THEMES
+                .iter()
+                .find(|(_, name)| Theme::from_name(name).border == self.theme.border)
+                .map(|(id, _)| *id)
+                .unwrap_or("tokyonight"),
+        );
+        // Sync cursor to current theme by id comparison.
+        let current_name = ALL_THEMES
+            .get(self.theme_picker_cursor)
+            .map(|(id, _)| *id)
+            .unwrap_or("tokyonight");
+        let _ = current_name;
+        self.show_theme_picker = true;
+    }
+
+    pub fn theme_picker_move(&mut self, delta: i32) {
+        let len = ALL_THEMES.len();
+        if len == 0 {
+            return;
+        }
+        self.theme_picker_cursor =
+            ((self.theme_picker_cursor as i32 + delta).rem_euclid(len as i32)) as usize;
+        // Live preview: apply theme immediately.
+        self.theme = Theme::from_name(ALL_THEMES[self.theme_picker_cursor].0);
+    }
+
+    pub fn theme_picker_commit(&mut self, registry: &Registry) {
+        let id = ALL_THEMES[self.theme_picker_cursor].0;
+        // Persist to config (best effort — don't crash TUI on write failure).
+        let _ = crate::registry::write_theme(&registry.base_dir, id);
+        self.saved_theme_id = id.to_string();
+        self.theme_picker_original = None;
+        self.show_theme_picker = false;
+    }
+
+    pub fn theme_picker_revert(&mut self) {
+        if let Some(original) = self.theme_picker_original.take() {
+            self.theme = original;
+        }
+        self.show_theme_picker = false;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -158,48 +229,41 @@ impl App {
 // ---------------------------------------------------------------------------
 
 /// Open (or focus) a dedicated `task-master` tmux window and run the TUI there.
-///
-/// If the window doesn't exist yet, it is created in the current session and
-/// focused. If it already exists, we just focus it (the TUI is already running
-/// there, driven by the other process).
 pub fn cmd_tui(registry: &Registry) -> Result<()> {
     let session = tmux::current_session()
         .context("task-master tui must be run from within a tmux session")?;
 
-    // Ensure the dedicated task-master window exists and is focused.
     let base_dir = registry.base_dir.to_string_lossy().to_string();
     ensure_tui_window(&session, &base_dir)?;
 
-    // Initialise the App state.
     let mut app = App::new(registry, session.clone());
     app.refresh_phases();
     app.load_stats_for_selected();
 
-    // Set up the terminal.
     enable_raw_mode().context("Failed to enable raw mode")?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen).context("Failed to enter alternate screen")?;
+    execute!(stdout, EnableBracketedPaste).context("Failed to enable bracketed paste")?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("Failed to create terminal")?;
 
     let res = run_loop(&mut terminal, &mut app, registry);
 
-    // Always restore the terminal, even on error.
     disable_raw_mode().ok();
+    execute!(terminal.backend_mut(), DisableBracketedPaste).ok();
     execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
     terminal.show_cursor().ok();
 
     res
 }
 
-/// Create the `task-master` tmux window if it doesn't exist, then focus it.
 fn ensure_tui_window(session: &str, working_dir: &str) -> Result<()> {
     use std::process::Command;
 
     let window_name = "task-master";
 
     if tmux::find_window_index(session, window_name).is_none() {
-        // Create a new window (don't switch yet — we do that next).
+        // Create the window at the end, then move it to slot 1.
         let end_target = format!("{}:", session);
         let status = Command::new("tmux")
             .args([
@@ -217,9 +281,15 @@ fn ensure_tui_window(session: &str, working_dir: &str) -> Result<()> {
         if !status.success() {
             anyhow::bail!("tmux new-window failed");
         }
+        // Move it to slot 1, shifting any existing windows up.
+        let src_target = format!("{}:{}", session, window_name);
+        let dst_target = format!("{}:1", session);
+        Command::new("tmux")
+            .args(["move-window", "-r", "-s", &src_target, "-t", &dst_target])
+            .status()
+            .ok(); // best-effort; don't fail the whole TUI if renumbering fails
     }
 
-    // Focus the window.
     if let Some(idx) = tmux::find_window_index(session, window_name) {
         let target = format!("{}:{}", session, idx);
         Command::new("tmux")
@@ -243,13 +313,18 @@ fn run_loop<B: ratatui::backend::Backend>(
     loop {
         terminal.draw(|f| render(f, app))?;
 
-        // Poll with a 2-second timeout for the refresh tick.
         if event::poll(Duration::from_millis(2000))? {
-            if let Event::Key(key) = event::read()? {
-                // Only react to key-press events (not release/repeat on some platforms).
-                if key.kind == KeyEventKind::Press {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    app.last_key_at = Instant::now();
                     handle_key(app, registry, key.code, key.modifiers)?;
                 }
+                Event::Paste(text) => {
+                    if matches!(app.mode, Mode::Prompt(_) | Mode::ForceConfirm) {
+                        app.input_buf.push_str(&text);
+                    }
+                }
+                _ => {}
             }
         } else {
             // Timeout: refresh phases.
@@ -263,6 +338,10 @@ fn run_loop<B: ratatui::backend::Backend>(
     Ok(())
 }
 
+fn render(f: &mut Frame, app: &mut App) {
+    crate::ui::render(f, app);
+}
+
 // ---------------------------------------------------------------------------
 // Key handling
 // ---------------------------------------------------------------------------
@@ -273,11 +352,40 @@ fn handle_key(
     code: KeyCode,
     _modifiers: KeyModifiers,
 ) -> Result<()> {
+    // Theme picker consumes all keys when open.
+    if app.show_theme_picker {
+        return handle_theme_picker(app, registry, code);
+    }
+    // Help overlay: any key closes it.
+    if app.show_help {
+        app.show_help = false;
+        return Ok(());
+    }
+
     match &app.mode.clone() {
         Mode::Normal => handle_normal(app, registry, code),
         Mode::Prompt(kind) => handle_prompt(app, registry, code, kind.clone()),
         Mode::ForceConfirm => handle_force_confirm(app, registry, code),
     }
+}
+
+fn handle_theme_picker(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()> {
+    match code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            app.theme_picker_move(1);
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.theme_picker_move(-1);
+        }
+        KeyCode::Enter => {
+            app.theme_picker_commit(registry);
+        }
+        KeyCode::Esc => {
+            app.theme_picker_revert();
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn handle_normal(app: &mut App, _registry: &Registry, code: KeyCode) -> Result<()> {
@@ -293,13 +401,18 @@ fn handle_normal(app: &mut App, _registry: &Registry, code: KeyCode) -> Result<(
             app.move_down();
             app.load_stats_for_selected();
         }
+        KeyCode::Char('t') => {
+            app.open_theme_picker();
+        }
+        KeyCode::Char('?') => {
+            app.show_help = !app.show_help;
+        }
         KeyCode::Char('s') => {
             if app.worktrees.is_empty() {
                 return Ok(());
             }
             let phase = app.selected_phase().to_string();
             if App::is_active_phase(&phase) {
-                // Active window: warn first, let user type prompt and confirm.
                 app.set_status(format!(
                     "Warning: {} is [{}] — spawning will kill the running agent. Type prompt and Enter to confirm, Esc to cancel.",
                     app.selected().and_then(|i| app.worktrees.get(i)).map(|w| w.window_name.as_str()).unwrap_or("?"),
@@ -317,7 +430,6 @@ fn handle_normal(app: &mut App, _registry: &Registry, code: KeyCode) -> Result<(
             app.mode = Mode::Prompt(ActionKind::Plan);
         }
         KeyCode::Char('x') => {
-            // QA — only enabled when window is active.
             let phase = app.selected_phase().to_string();
             if !App::is_active_phase(&phase) || app.worktrees.is_empty() {
                 return Ok(());
@@ -350,12 +462,10 @@ fn handle_normal(app: &mut App, _registry: &Registry, code: KeyCode) -> Result<(
             }
             if let Some(i) = app.selected() {
                 if let Some(wt) = app.worktrees.get(i) {
-                    // Find the actual current window name (with phase suffix).
                     let full_name = format!("{}:{}", wt.window_name, phase);
                     attach_to_window(&app.session, &wt.window_name, &full_name);
                 }
             }
-            app.should_quit = true;
         }
         _ => {}
     }
@@ -375,7 +485,14 @@ fn handle_prompt(
             app.status_msg = None;
         }
         KeyCode::Enter => {
-            execute_action(app, registry, &kind, false)?;
+            // If a key arrived within 20 ms of the previous one we're almost
+            // certainly inside a paste burst — treat the newline as literal text
+            // rather than a submit trigger.
+            if app.last_key_at.elapsed() < Duration::from_millis(20) {
+                app.input_buf.push('\n');
+            } else {
+                execute_action(app, registry, &kind, false)?;
+            }
         }
         KeyCode::Backspace => {
             app.input_buf.pop();
@@ -427,6 +544,7 @@ fn execute_spawn(app: &mut App, registry: &Registry, force: bool) -> Result<()> 
     };
     match crate::cmd_spawn(registry, &wt_name, &prompt, force) {
         Ok(()) => {
+            let _ = tmux::select_tui_window(&app.session);
             app.set_status(format!("Spawned {}:dev", wt_name));
             app.mode = Mode::Normal;
             app.input_buf.clear();
@@ -435,7 +553,6 @@ fn execute_spawn(app: &mut App, registry: &Registry, force: bool) -> Result<()> 
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("uncommitted changes") && !force {
-                // Ask for explicit force confirmation.
                 app.set_status(format!(
                     "{} has uncommitted changes. Press Enter to force-reset and spawn, Esc to cancel.",
                     wt_name
@@ -458,6 +575,7 @@ fn execute_plan(app: &mut App, registry: &Registry) -> Result<()> {
     };
     match crate::plan::cmd_plan(registry, &wt_name, &prompt) {
         Ok(()) => {
+            let _ = tmux::select_tui_window(&app.session);
             app.set_status(format!("Plan agent started in {}:plan", wt_name));
             app.mode = Mode::Normal;
             app.input_buf.clear();
@@ -486,6 +604,7 @@ fn execute_qa(app: &mut App, registry: &Registry) -> Result<()> {
     };
     match crate::qa::cmd_qa(registry, &wt_name, pr_number) {
         Ok(()) => {
+            let _ = tmux::select_tui_window(&app.session);
             app.set_status(format!(
                 "QA agent started for {} PR #{}",
                 wt_name, pr_number
@@ -503,8 +622,6 @@ fn execute_qa(app: &mut App, registry: &Registry) -> Result<()> {
     Ok(())
 }
 
-/// Returns (worktree_name, prompt_text) from the current app state, or None if
-/// inputs are missing.
 fn collect_spawn_inputs(app: &mut App) -> Option<(String, String)> {
     let wt_name = app
         .selected()
@@ -520,7 +637,6 @@ fn collect_spawn_inputs(app: &mut App) -> Option<(String, String)> {
 
 fn attach_to_window(session: &str, base_name: &str, full_name: &str) {
     use std::process::Command;
-    // Try the full name first (e.g. WIS-olive:dev), fall back to base name.
     let target_full = format!("{}:{}", session, full_name);
     let status = Command::new("tmux")
         .args(["select-window", "-t", &target_full])
@@ -528,270 +644,12 @@ fn attach_to_window(session: &str, base_name: &str, full_name: &str) {
     if status.map(|s| s.success()).unwrap_or(false) {
         return;
     }
-    // Fallback: look up by index.
     if let Some(idx) = tmux::find_window_index(session, base_name) {
         let target = format!("{}:{}", session, idx);
         Command::new("tmux")
             .args(["select-window", "-t", &target])
             .status()
             .ok();
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Rendering
-// ---------------------------------------------------------------------------
-
-fn render(f: &mut Frame, app: &mut App) {
-    let area = f.area();
-
-    // Outer layout: title (1), main (fill), bottom bar (1).
-    let outer = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ])
-        .split(area);
-
-    render_title(f, outer[0]);
-    render_main(f, outer[1], app);
-    render_bottom_bar(f, outer[2], app);
-}
-
-fn render_title(f: &mut Frame, area: Rect) {
-    let title = Paragraph::new(Line::from(vec![
-        Span::styled(
-            " task-master",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "   q quit  s spawn  p plan  x qa  r reset  a attach",
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]))
-    .style(Style::default().bg(Color::Black));
-    f.render_widget(title, area);
-}
-
-fn render_main(f: &mut Frame, area: Rect, app: &mut App) {
-    // Split into left (worktree list) and right (actions).
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-        .split(area);
-
-    render_worktree_list(f, cols[0], app);
-    render_actions(f, cols[1], app);
-}
-
-fn render_worktree_list(f: &mut Frame, area: Rect, app: &mut App) {
-    let items: Vec<ListItem> = app
-        .worktrees
-        .iter()
-        .enumerate()
-        .map(|(i, wt)| {
-            let phase = app.phases.get(i).map(|s| s.as_str()).unwrap_or("?");
-            let phase_color = phase_color(phase);
-            let line = Line::from(vec![
-                Span::raw(format!("{:<20}", wt.window_name)),
-                Span::styled(format!("[{}]", phase), Style::default().fg(phase_color)),
-            ]);
-            ListItem::new(line)
-        })
-        .collect();
-
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Worktrees ")
-                .border_style(Style::default().fg(Color::DarkGray)),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("> ");
-
-    f.render_stateful_widget(list, area, &mut app.list_state);
-}
-
-fn render_actions(f: &mut Frame, area: Rect, app: &App) {
-    let phase = app.selected_phase().to_string();
-    let active = App::is_active_phase(&phase);
-    let has_wt = !app.worktrees.is_empty();
-
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(""));
-
-    let spawn_warn = if active { "  ⚠ resets window" } else { "" };
-    let spawn_label = format!("spawn agent{}", spawn_warn);
-    let plan_label = format!("plan{}", spawn_warn);
-
-    lines.push(action_line(
-        's',
-        &spawn_label,
-        has_wt,
-        active,
-        false, // spawn is always enabled when worktrees exist
-        true,
-    ));
-
-    // plan
-    lines.push(action_line('p', &plan_label, has_wt, active, false, true));
-
-    lines.push(Line::from(""));
-
-    // qa — only active windows
-    lines.push(action_line(
-        'x',
-        "qa  (enter PR #)",
-        has_wt,
-        active,
-        !active,
-        true,
-    ));
-
-    lines.push(Line::from(""));
-
-    // reset — only active windows
-    lines.push(action_line(
-        'r',
-        "reset window",
-        has_wt,
-        active,
-        !active,
-        true,
-    ));
-
-    // attach — only active windows
-    lines.push(action_line(
-        'a',
-        "attach  (leaves TUI)",
-        has_wt,
-        active,
-        !active,
-        true,
-    ));
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![Span::styled(
-        "  q  quit",
-        Style::default().fg(Color::DarkGray),
-    )]));
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Actions ")
-        .border_style(Style::default().fg(Color::DarkGray));
-
-    let para = Paragraph::new(lines).block(block);
-    f.render_widget(para, area);
-}
-
-/// Build a single action line.
-///
-/// `disabled` overrides everything and renders the line grayed out.
-/// `enabled` is the general enabled flag (e.g. has worktrees).
-fn action_line<'a>(
-    key: char,
-    label: &'a str,
-    _enabled: bool,
-    _active: bool,
-    disabled: bool,
-    _show_active_warn: bool,
-) -> Line<'a> {
-    let label = label.to_string();
-    if disabled {
-        Line::from(vec![
-            Span::styled("  -  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(label, Style::default().fg(Color::DarkGray)),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled(
-                format!("  {}  ", key),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(label, Style::default().fg(Color::White)),
-        ])
-    }
-}
-
-fn render_bottom_bar(f: &mut Frame, area: Rect, app: &App) {
-    let content = match &app.mode {
-        Mode::Prompt(ActionKind::Spawn) => {
-            format!(" Prompt: {}_", app.input_buf)
-        }
-        Mode::Prompt(ActionKind::Plan) => {
-            format!(" Task: {}_", app.input_buf)
-        }
-        Mode::Prompt(ActionKind::Qa) => {
-            format!(" PR number: {}_", app.input_buf)
-        }
-        Mode::ForceConfirm => {
-            " Press Enter to force-spawn (discards uncommitted changes), Esc to cancel".to_string()
-        }
-        Mode::Normal => {
-            // Show status message if recent, else stats.
-            if let Some(msg) = app.current_status() {
-                format!(" {}", msg)
-            } else {
-                stats_bar_text(app)
-            }
-        }
-    };
-
-    let style = match &app.mode {
-        Mode::Normal => Style::default().fg(Color::DarkGray),
-        Mode::ForceConfirm => Style::default().fg(Color::Red),
-        _ => Style::default().fg(Color::Green),
-    };
-
-    let para = Paragraph::new(content).style(style);
-    f.render_widget(para, area);
-}
-
-fn stats_bar_text(app: &App) -> String {
-    let idx = match app.selected() {
-        Some(i) => i,
-        None => return " No worktrees".to_string(),
-    };
-    let wt = match app.worktrees.get(idx) {
-        Some(w) => w,
-        None => return String::new(),
-    };
-    match app.stats_cache.get(&idx) {
-        Some(stats) if stats.input > 0 || stats.sessions > 0 => {
-            format!(
-                " {}  ·  {} in / {} out  ·  {} sessions",
-                wt.window_name,
-                format_tokens(stats.input),
-                format_tokens(stats.output),
-                stats.sessions,
-            )
-        }
-        _ => format!(" {}  ·  no usage data", wt.window_name),
-    }
-}
-
-fn phase_color(phase: &str) -> Color {
-    match phase {
-        "dev" => Color::Yellow,
-        "plan" => Color::Cyan,
-        "qa" => Color::Cyan,
-        "review" | "ready" => Color::Green,
-        "idle" | "?" | "" => Color::DarkGray,
-        p if p.ends_with("stalled") => Color::Red,
-        p if p == "blocked" => Color::Red,
-        _ => Color::White,
     }
 }
 
@@ -805,21 +663,23 @@ mod tests {
 
     #[test]
     fn test_phase_color_known_phases() {
-        assert_eq!(phase_color("dev"), Color::Yellow);
-        assert_eq!(phase_color("qa"), Color::Cyan);
-        assert_eq!(phase_color("plan"), Color::Cyan);
-        assert_eq!(phase_color("review"), Color::Green);
-        assert_eq!(phase_color("ready"), Color::Green);
-        assert_eq!(phase_color("blocked"), Color::Red);
-        assert_eq!(phase_color("idle"), Color::DarkGray);
-        assert_eq!(phase_color("?"), Color::DarkGray);
+        let t = Theme::tokyonight();
+        assert_eq!(t.phase_color("dev"), t.phase_dev);
+        assert_eq!(t.phase_color("qa"), t.phase_plan_qa);
+        assert_eq!(t.phase_color("plan"), t.phase_plan_qa);
+        assert_eq!(t.phase_color("review"), t.phase_done);
+        assert_eq!(t.phase_color("ready"), t.phase_done);
+        assert_eq!(t.phase_color("blocked"), t.phase_error);
+        assert_eq!(t.phase_color("idle"), t.phase_idle);
+        assert_eq!(t.phase_color("?"), t.phase_idle);
     }
 
     #[test]
     fn test_phase_color_stalled_variants() {
-        assert_eq!(phase_color("dev-stalled"), Color::Red);
-        assert_eq!(phase_color("qa-stalled"), Color::Red);
-        assert_eq!(phase_color("plan-stalled"), Color::Red);
+        let t = Theme::tokyonight();
+        assert_eq!(t.phase_color("dev-stalled"), t.phase_error);
+        assert_eq!(t.phase_color("qa-stalled"), t.phase_error);
+        assert_eq!(t.phase_color("plan-stalled"), t.phase_error);
     }
 
     #[test]
@@ -894,11 +754,9 @@ name = "a"
         let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
         let mut app = App::new(&reg, "test".to_string());
 
-        // Fresh message is visible.
         app.set_status("hello");
         assert_eq!(app.current_status(), Some("hello"));
 
-        // Artificially age it past the display window.
         if let Some((_, ref mut at)) = app.status_msg {
             *at = Instant::now() - Duration::from_secs(10);
         }
@@ -920,8 +778,10 @@ name = "alpha"
 "#;
         let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
         let app = App::new(&reg, "test".to_string());
-        let text = stats_bar_text(&app);
-        assert!(text.contains("S-alpha"));
-        assert!(text.contains("no usage data"));
+        // Verify the worktree name and empty stats cache.
+        let idx = app.selected().unwrap_or(0);
+        let wt = &app.worktrees[idx];
+        assert!(wt.window_name.contains("S-alpha"));
+        assert!(app.stats_cache.get(&idx).is_none());
     }
 }

@@ -1,6 +1,12 @@
 # task-master.toml — copy this file to task-master.toml and fill in your own values.
 # task-master.toml is gitignored so your project names stay private.
 
+# ── UI / Appearance ───────────────────────────────────────────────────────────
+# Available themes: tokyonight, gruvbox, catppuccin, nord, dracula, rosepine
+# The TUI theme picker (press t) writes this field automatically.
+[ui]
+theme = "tokyonight"
+
 # Each [[projects]] block registers one git repository.
 #
 # Fields:

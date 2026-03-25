@@ -8,6 +8,7 @@ mod stats;
 mod status;
 mod supervise;
 mod tmux;
+mod tui;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -114,6 +115,8 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Open the interactive TUI dashboard
+    Tui,
 }
 
 fn main() -> Result<()> {
@@ -174,6 +177,7 @@ fn main() -> Result<()> {
                 Commands::RemoveWorktree { worktree, force } => {
                     cmd_remove_worktree(&registry, &base_dir, &worktree, force)
                 }
+                Commands::Tui => tui::cmd_tui(&registry),
                 Commands::AddProject { .. } => unreachable!(),
             }
         }
@@ -284,7 +288,7 @@ fn reset_worktree_to_master(path: &Path, force: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_spawn(registry: &Registry, window_name: &str, prompt: &str, force: bool) -> Result<()> {
+pub fn cmd_spawn(registry: &Registry, window_name: &str, prompt: &str, force: bool) -> Result<()> {
     let worktree = registry.require_worktree(window_name)?;
 
     reset_worktree_to_master(&worktree.abs_path, force)?;
@@ -496,7 +500,7 @@ fn cmd_add_project(base_dir: &PathBuf, name: &str, short: &str, url: &str) -> Re
 // reset
 // ---------------------------------------------------------------------------
 
-fn cmd_reset(worktree: &str) -> Result<()> {
+pub fn cmd_reset(worktree: &str) -> Result<()> {
     let session = tmux::current_session()?;
     let base = tmux::base_window_name(worktree);
     tmux::set_window_phase(&session, base, None)?;

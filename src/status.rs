@@ -91,7 +91,7 @@ pub fn cmd_status(registry: &Registry) -> Result<()> {
 ///
 /// Returns `Some(phase)` if a window is found (where phase may be an empty
 /// string if the window has no phase suffix), or `None` if no window matches.
-fn find_live_phase(session: &str, base_name: &str) -> Option<String> {
+pub fn find_live_phase(session: &str, base_name: &str) -> Option<String> {
     use std::process::Command;
 
     let output = Command::new("tmux")

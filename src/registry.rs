@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use toml_edit::DocumentMut;
@@ -18,9 +18,29 @@ pub struct ProjectConfig {
     pub worktrees: Vec<WorktreeConfig>,
 }
 
+fn default_theme() -> String {
+    "tokyonight".to_string()
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct UiConfig {
+    #[serde(default = "default_theme")]
+    pub theme: String,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            theme: default_theme(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct RawConfig {
     projects: Vec<ProjectConfig>,
+    #[serde(default)]
+    ui: UiConfig,
 }
 
 /// A fully-resolved worktree ready for use.
@@ -43,6 +63,7 @@ pub struct Registry {
     pub projects: Vec<ProjectConfig>,
     pub worktrees: Vec<Worktree>,
     pub base_dir: PathBuf,
+    pub ui: UiConfig,
 }
 
 impl Registry {
@@ -89,6 +110,7 @@ impl Registry {
             projects: raw.projects,
             worktrees,
             base_dir,
+            ui: raw.ui,
         })
     }
 
@@ -128,6 +150,28 @@ impl Registry {
         }
         Ok(())
     }
+}
+
+/// Update the `[ui] theme` key in the TOML config file without disturbing any
+/// other content.  Creates the `[ui]` table if it doesn't exist yet.
+pub fn write_theme(base_dir: &PathBuf, theme_id: &str) -> Result<()> {
+    let config_path = base_dir.join("task-master.toml");
+    let contents = fs::read_to_string(&config_path)
+        .with_context(|| format!("Failed to read config: {}", config_path.display()))?;
+
+    let mut doc = contents
+        .parse::<DocumentMut>()
+        .context("Failed to parse task-master.toml")?;
+
+    // Ensure the [ui] table exists.
+    if doc.get("ui").is_none() {
+        doc["ui"] = toml_edit::table();
+    }
+    doc["ui"]["theme"] = toml_edit::value(theme_id);
+
+    fs::write(&config_path, doc.to_string())
+        .with_context(|| format!("Failed to write config: {}", config_path.display()))?;
+    Ok(())
 }
 
 /// Remove a `[[projects.worktrees]]` entry from the TOML document string.

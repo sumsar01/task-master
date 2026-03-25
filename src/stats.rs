@@ -325,6 +325,29 @@ pub fn cmd_stats(registry: &Registry, days: Option<u32>) -> Result<()> {
         total_cost_cents += proj_cost_cents;
     }
 
+    // Supervisor row — opencode sessions launched from the task-master base dir.
+    let supervisor_dir = registry.base_dir.to_string_lossy().to_string();
+    let supervisor_stats = fetch_stats(&supervisor_dir, days).unwrap_or_default();
+    if supervisor_stats.input > 0 || supervisor_stats.sessions > 0 {
+        let tok = format!(
+            "{} / {}",
+            format_tokens(supervisor_stats.input),
+            format_tokens(supervisor_stats.output)
+        );
+        println!(
+            "{:<name_w$}  {:>tok_w$}  {:>cost_w$}",
+            "supervisor",
+            tok,
+            format_cost(supervisor_stats.cost_cents),
+            name_w = name_w,
+            tok_w = tok_w,
+            cost_w = cost_w
+        );
+        total_input += supervisor_stats.input;
+        total_output += supervisor_stats.output;
+        total_cost_cents += supervisor_stats.cost_cents;
+    }
+
     // Total line
     println!("{}", "─".repeat(name_w + 2 + tok_w + 2 + cost_w));
     let total_tok = format!(

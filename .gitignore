@@ -1,6 +1,9 @@
 projects/*
 !projects/.gitkeep
 
+# Local config — copy task-master.example.toml to task-master.toml and customise
+task-master.toml
+
 # Dolt database files (added by bd init)
 .dolt/
 *.db

@@ -1,0 +1,31 @@
+# task-master.toml — copy this file to task-master.toml and fill in your own values.
+# task-master.toml is gitignored so your project names stay private.
+
+# Each [[projects]] block registers one git repository.
+#
+# Fields:
+#   name   — full repo/directory name under projects/
+#   short  — short prefix used for tmux window names (e.g. "API" → "API-main")
+#   repo   — path relative to this file where the bare repo / worktrees live
+#
+# Each [[projects.worktrees]] block registers one worktree inside that repo.
+#   name   — worktree directory name; also becomes the window suffix
+
+[[projects]]
+name = "my-service"
+short = "SVC"
+repo = "projects/my-service"
+
+  [[projects.worktrees]]
+  name = "main"
+
+  [[projects.worktrees]]
+  name = "feature"
+
+[[projects]]
+name = "another-project"
+short = "AP"
+repo = "projects/another-project"
+
+  [[projects.worktrees]]
+  name = "main"

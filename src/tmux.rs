@@ -263,7 +263,10 @@ fn build_opencode_cmd(prompt_file: &str, agent: Option<&str>) -> String {
     }
     // Double-quote the command substitution so the prompt value (which may
     // contain spaces, newlines, single-quotes, etc.) is passed as one argument.
-    cmd.push_str(&format!(" --prompt \"$(cat {})\"", shell_escape(prompt_file)));
+    cmd.push_str(&format!(
+        " --prompt \"$(cat {})\"",
+        shell_escape(prompt_file)
+    ));
     cmd
 }
 

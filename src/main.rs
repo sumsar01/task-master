@@ -1,5 +1,6 @@
 mod e2e;
 mod hooks;
+mod notify;
 mod plan;
 mod qa;
 mod registry;
@@ -69,6 +70,13 @@ enum Commands {
         /// Worktree window name, e.g. WIS-olive
         worktree: String,
         /// GitHub PR number to review
+        pr_number: u64,
+    },
+    /// Notify the supervisor that a PR is ready for QA (safe to call from inside an agent)
+    Notify {
+        /// Worktree window name, e.g. WIS-olive
+        worktree: String,
+        /// GitHub PR number that is ready for QA
         pr_number: u64,
     },
     /// Spawn an e2e validation agent for a worktree's deployed PR
@@ -143,6 +151,10 @@ fn main() -> Result<()> {
                     worktree,
                     pr_number,
                 } => qa::cmd_qa(&registry, &worktree, pr_number),
+                Commands::Notify {
+                    worktree,
+                    pr_number,
+                } => notify::cmd_notify(&registry, &worktree, pr_number),
                 Commands::E2e {
                     worktree,
                     pr_number,
@@ -180,12 +192,13 @@ When you are ready to open a PR, you MUST follow these steps in order:
 2. Open the PR with --no-push and --label wip:
    gh pr create --no-push --label wip --title \"<title>\" --body \"<body>\"
 
-3. Read the PR number from the URL printed by gh pr create, then trigger QA:
-   task-master qa {base_name} <pr-number>
+3. Read the PR number from the URL printed by gh pr create, then notify the supervisor:
+   task-master notify {base_name} <pr-number>
 
 NEVER use `gh pr create` without `--no-push` — it pushes via the GitHub API and
 bypasses the git post-push hook, so QA will never start automatically.
-NEVER skip step 3 — the QA agent does not start on its own.",
+NEVER call `task-master qa` directly — it replaces the running process and will kill
+your session before the command can return. Always use `task-master notify` instead.",
         user_prompt = user_prompt,
         base_name = base_name,
     )

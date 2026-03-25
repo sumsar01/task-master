@@ -1,7 +1,7 @@
 ---
 description: Monitors worktree windows and drives phase transitions based on what agents are doing
 mode: primary
-model: github-copilot/claude-sonnet-4.6
+model: github-copilot/gpt-4.1-mini
 temperature: 0.1
 permission:
   edit: deny
@@ -38,6 +38,32 @@ Map window base name (e.g. "WIS-olive") to that path.
 Also store:
 - `SESSION` — from `tmux display-message -p '#S'`
 - `TASK_MASTER` — `<base_dir>/target/release/task-master` (full path, not on PATH)
+
+---
+
+## Step 0 — Drain notify events
+
+Before inspecting windows, process any pending notify events written by dev agents.
+Dev agents call `task-master notify <base> <pr>` instead of `task-master qa` to avoid
+killing their own session. The notify command writes an event file and touches a wake
+stamp; this step drains those events.
+
+```bash
+ls /tmp/task-master-notify-*.json 2>/dev/null
+```
+
+For each file found:
+```bash
+worktree=$(jq -r .worktree <file>)
+pr=$(jq -r .pr <file>)
+rm -f <file>
+$TASK_MASTER qa "$worktree" "$pr"
+```
+
+Log: `<worktree>: received notify event, spawning QA for PR #<pr>`
+
+Process **all** notify files before moving on to Step 1. If `jq` is unavailable, parse
+with `python3 -c "import json,sys; d=json.load(sys.stdin); print(d['worktree'], d['pr'])"`.
 
 ---
 
@@ -157,6 +183,7 @@ Read the pane. Determine which of these is true:
    ```
    - If `$_pr` is non-empty → a PR already exists that the pane scrolled past. Spawn QA:
      ```bash
+     rm -f "/tmp/task-master-qa-respawn-<base-name>" 2>/dev/null
      $TASK_MASTER qa <base-name> $_pr
      ```
      Log it.
@@ -172,6 +199,7 @@ Read the pane. Determine which of these is true:
    - If `$_pr` is non-empty → the agent finished cleanly and created a PR; the TUI exited
      normally. Spawn QA:
      ```bash
+     rm -f "/tmp/task-master-qa-respawn-<base-name>" 2>/dev/null
      $TASK_MASTER qa <base-name> $_pr
      ```
      Log it.
@@ -190,7 +218,38 @@ Read the pane. Determine which of these is true:
 
 2. **Shell prompt, no TUI** — the opencode process has exited without renaming the
    window (it would already be `:review` or `:blocked` and thus skipped if it had) →
-   rename to `:blocked` and log it as a crash.
+   attempt to respawn QA before giving up, using a stamp file to cap retries at 2:
+
+   ```bash
+   _stamp="/tmp/task-master-qa-respawn-<base-name>"
+   _attempts=$(cat "$_stamp" 2>/dev/null || echo 0)
+   ```
+
+   - If `$_attempts < 2`:
+     Look up the open PR on the current branch:
+     ```bash
+     _branch=$(git -C <worktree-path> rev-parse --abbrev-ref HEAD 2>/dev/null)
+     _pr=$(gh pr list --head "$_branch" --state open --json number --jq '.[0].number' 2>/dev/null)
+     ```
+     - If `$_pr` is non-empty: increment the counter and respawn QA:
+       ```bash
+       echo $((_attempts + 1)) > "$_stamp"
+       $TASK_MASTER qa <base-name> $_pr
+       ```
+       Log: `<base>: QA crashed, respawning (attempt $((_attempts + 1))/2)`
+     - If `$_pr` is empty: no PR to QA — rename to `:qa-stalled`, clear stamp, log as crash.
+       ```bash
+       rm -f "$_stamp"
+       rm -f "/tmp/task-master-spinning-<base-name>" 2>/dev/null
+       ```
+
+   - If `$_attempts >= 2`:
+     We've already tried twice. Rename to `:qa-stalled`, clear stamp, log as repeated crash:
+     ```bash
+     rm -f "$_stamp"
+     rm -f "/tmp/task-master-spinning-<base-name>" 2>/dev/null
+     ```
+     Log: `<base>: QA crashed after 2 respawn attempts, marking :qa-stalled`
 
 ### :plan windows
 

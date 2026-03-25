@@ -36,6 +36,16 @@ cp -rf source dest          # NOT: cp -r source dest
 - `apt-get` - use `-y` flag
 - `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
 
+## Spawning Agents
+
+When the user provides a task or plan to hand off to an agent, do the minimum necessary and spawn immediately:
+
+1. Write the prompt to `/tmp/task-master-prompt-<something>.txt` — use exactly what the user gave you, supplemented only with the branch name, worktree path, PR workflow steps, and quality gate commands if the user didn't specify them.
+2. Run `./target/release/task-master spawn <worktree> "$(cat '/tmp/...')"` immediately.
+3. Done. Do not explore the codebase, do not pre-create bd issues, do not make decisions that belong to the agent.
+
+**The agent owns everything else:** bd tracking, branching, code exploration, PRs, QA triggers.
+
 <!-- BEGIN BEADS INTEGRATION -->
 ## Issue Tracking with bd (beads)
 
@@ -160,7 +170,8 @@ Agent does work on a worktree
   -> window:  WIS-olive:dev
   -> pushes branch:  git push origin HEAD
   -> opens PR:  gh pr create --no-push --label wip --title "..." --body "..."
-  -> triggers QA:  task-master qa <worktree> <pr-number>  (non-blocking)
+  -> notifies supervisor:  task-master notify <worktree> <pr-number>  (safe, non-blocking)
+  -> supervisor wakes within ~2s, spawns QA:  task-master qa <worktree> <pr-number>
   -> SAME window renamed WIS-olive:qa, fresh opencode TUI starts with QA prompt
 
 QA agent (up to 3 iterations):
@@ -207,6 +218,10 @@ task-master qa <worktree> <pr-number>
 task-master qa WIS-olive 42
 ```
 
+**Note:** `task-master qa` is for **humans and the supervisor only**. Dev agents must never
+call it directly — it replaces the running process and will kill the agent's session before
+the command can return. Agents use `task-master notify` instead.
+
 ### Rules for agents opening PRs
 
 - Always push the branch explicitly before creating the PR, then use `--no-push`:
@@ -216,11 +231,13 @@ task-master qa WIS-olive 42
   ```
   `gh pr create` (without `--no-push`) pushes via the GitHub API and bypasses the
   git `post-push` hook entirely — QA will never start automatically if you do that.
-- After opening the PR, **always** trigger QA manually:
+- After opening the PR, **always** notify the supervisor:
   ```bash
-  task-master qa <worktree> <pr-number>
+  task-master notify <worktree> <pr-number>
   ```
   Read the PR number from the `gh pr create` output (it prints the PR URL).
+  The supervisor wakes within ~2 seconds and spawns the QA agent.
+  **Never call `task-master qa` directly** — it kills the running session.
 - Never remove the `wip` label yourself — the QA agent owns that.
 - The QA agent will push `qa:` prefixed commits directly to your branch; do not rebase while it is running.
 

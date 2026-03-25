@@ -53,10 +53,51 @@ pub fn cmd_supervise(registry: &Registry) -> Result<()> {
 
     // Export TASK_MASTER before the loop so the agent prompt can use it.
     // The sentinel string is embedded as a comment so pkill can identify the loop.
+    //
+    // The loop has two token-saving guards:
+    //
+    // 1. Idle skip: only invokes `opencode run` when at least one tmux window has
+    //    an active phase suffix (:dev, :qa, :plan, or :e2e). When no agents are
+    //    running the entire opencode call is skipped — zero tokens burned.
+    //
+    // 2. Sleep/wake guard: records the epoch of the last run in
+    //    /tmp/task-master-supervisor-last. If a run completed less than 60 seconds
+    //    ago we skip this pass. This protects against the OS resuming a suspended
+    //    `sleep 300` immediately on wake and firing a back-to-back pass.
+    //
+    // The sleep itself is wake-aware: `sleep 300` runs in the background and a
+    // 2-second inner loop polls /tmp/task-master-supervisor-wake. When the stamp
+    // appears (written by `task-master notify`) the background sleep is killed and
+    // the next supervisor pass fires immediately instead of waiting 5 minutes.
     let loop_cmd = format!(
-        "export TASK_MASTER={}; while true; do : {}; opencode run --agent supervisor 'Check worktree windows and act on any that need attention.'; sleep 300; done",
-        tmux::shell_escape(bin_str),
-        SUPERVISOR_SENTINEL,
+        concat!(
+            "export TASK_MASTER={bin};",
+            " while true; do",
+            " : {sentinel};",
+            // Sleep/wake guard: skip if we ran less than 60s ago
+            " _now=$(date +%s);",
+            " _last=$(cat /tmp/task-master-supervisor-last 2>/dev/null || echo 0);",
+            " if [ $(( _now - _last )) -ge 60 ]; then",
+            // Idle skip: only run the agent if there are active phase windows
+            " if tmux list-windows -F '#{{window_name}}' 2>/dev/null | grep -qE ':(dev|qa|plan|e2e)$'; then",
+            " opencode run --agent supervisor 'Check worktree windows and act on any that need attention.';",
+            " date +%s > /tmp/task-master-supervisor-last;",
+            " fi;",
+            " fi;",
+            // Wake-aware sleep: poll for an early-wake stamp every 2s
+            " sleep 300 & _sleep_pid=$!;",
+            " while kill -0 $_sleep_pid 2>/dev/null; do",
+            " if [ -f /tmp/task-master-supervisor-wake ]; then",
+            " rm -f /tmp/task-master-supervisor-wake;",
+            " kill $_sleep_pid 2>/dev/null;",
+            " break;",
+            " fi;",
+            " sleep 2;",
+            " done;",
+            " done",
+        ),
+        bin = tmux::shell_escape(bin_str),
+        sentinel = SUPERVISOR_SENTINEL,
     );
 
     tmux::spawn_named_window_raw(&session, "supervisor", &working_dir, &loop_cmd)
@@ -83,9 +124,31 @@ mod tests {
         // format string produces the right output for a known bin path.
         let bin_str = "/usr/local/bin/task-master";
         let loop_cmd = format!(
-            "export TASK_MASTER={}; while true; do : {}; opencode run --agent supervisor 'Check worktree windows and act on any that need attention.'; sleep 300; done",
-            tmux::shell_escape(bin_str),
-            SUPERVISOR_SENTINEL,
+            concat!(
+                "export TASK_MASTER={bin};",
+                " while true; do",
+                " : {sentinel};",
+                " _now=$(date +%s);",
+                " _last=$(cat /tmp/task-master-supervisor-last 2>/dev/null || echo 0);",
+                " if [ $(( _now - _last )) -ge 60 ]; then",
+                " if tmux list-windows -F '#{{window_name}}' 2>/dev/null | grep -qE ':(dev|qa|plan|e2e)$'; then",
+                " opencode run --agent supervisor 'Check worktree windows and act on any that need attention.';",
+                " date +%s > /tmp/task-master-supervisor-last;",
+                " fi;",
+                " fi;",
+                " sleep 300 & _sleep_pid=$!;",
+                " while kill -0 $_sleep_pid 2>/dev/null; do",
+                " if [ -f /tmp/task-master-supervisor-wake ]; then",
+                " rm -f /tmp/task-master-supervisor-wake;",
+                " kill $_sleep_pid 2>/dev/null;",
+                " break;",
+                " fi;",
+                " sleep 2;",
+                " done;",
+                " done",
+            ),
+            bin = tmux::shell_escape(bin_str),
+            sentinel = SUPERVISOR_SENTINEL,
         );
         assert!(
             loop_cmd.contains(SUPERVISOR_SENTINEL),
@@ -102,6 +165,18 @@ mod tests {
         assert!(
             loop_cmd.contains("opencode run --agent supervisor"),
             "loop_cmd must invoke the supervisor agent"
+        );
+        assert!(
+            loop_cmd.contains("task-master-supervisor-wake"),
+            "loop_cmd must poll the wake stamp file"
+        );
+        assert!(
+            loop_cmd.contains("task-master-supervisor-last"),
+            "loop_cmd must record the last-run timestamp for the wake guard"
+        );
+        assert!(
+            loop_cmd.contains(":(dev|qa|plan|e2e)$"),
+            "loop_cmd must skip opencode run when no active phase windows exist"
         );
     }
 

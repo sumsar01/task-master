@@ -7,6 +7,8 @@ permission:
   edit: deny
   bash:
     "*": allow
+  external_directory:
+    "*": allow
 ---
 
 You are a supervisor agent. Your job is to watch the active worktree windows in this tmux

@@ -13,11 +13,109 @@ pub struct StatsRow {
     pub cost_str: String, // original formatted string e.g. "$1.23"
 }
 
-/// Run `opencode stats --project <path> [--days N]` and parse the output.
+/// Resolve the path to the opencode SQLite database.
+///
+/// opencode stores its database at `$XDG_DATA_HOME/opencode/opencode.db`,
+/// which on macOS defaults to `~/.local/share/opencode/opencode.db`.
+fn opencode_db_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| dirs_next_home().join(".local").join("share"));
+    let p = base.join("opencode").join("opencode.db");
+    if p.exists() {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+/// Portable home-directory resolution (avoids a heavy dependency).
+fn dirs_next_home() -> std::path::PathBuf {
+    std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+}
+
+/// Query the opencode SQLite database for token usage of sessions launched
+/// from `session_dir` (the exact `session.directory` value stored by opencode).
+///
+/// `days` optionally restricts to sessions whose `time_updated` falls within
+/// the last N days (matching the `--days` semantics of `opencode stats`).
+///
+/// Returns `None` if the DB cannot be opened or no assistant messages exist.
+pub fn fetch_stats(session_dir: &str, days: Option<u32>) -> Option<StatsRow> {
+    let db_path = opencode_db_path()?;
+    let conn = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+
+    // Build the time filter (ms epoch).
+    let time_cutoff: Option<i64> = days.map(|d| {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        now_ms - (d as i64 * 24 * 60 * 60 * 1000)
+    });
+
+    let sql = if time_cutoff.is_some() {
+        "SELECT
+            COUNT(DISTINCT s.id),
+            COALESCE(SUM(CAST(json_extract(m.data, '$.tokens.input')  AS INTEGER)), 0),
+            COALESCE(SUM(CAST(json_extract(m.data, '$.tokens.output') AS INTEGER)), 0),
+            COALESCE(SUM(CAST(json_extract(m.data, '$.tokens.cache.read') AS INTEGER)), 0)
+         FROM session s
+         JOIN message m ON m.session_id = s.id
+         WHERE s.directory = ?1
+           AND json_extract(m.data, '$.role') = 'assistant'
+           AND s.time_updated >= ?2"
+    } else {
+        "SELECT
+            COUNT(DISTINCT s.id),
+            COALESCE(SUM(CAST(json_extract(m.data, '$.tokens.input')  AS INTEGER)), 0),
+            COALESCE(SUM(CAST(json_extract(m.data, '$.tokens.output') AS INTEGER)), 0),
+            COALESCE(SUM(CAST(json_extract(m.data, '$.tokens.cache.read') AS INTEGER)), 0)
+         FROM session s
+         JOIN message m ON m.session_id = s.id
+         WHERE s.directory = ?1
+           AND json_extract(m.data, '$.role') = 'assistant'"
+    };
+
+    let result: Option<(i64, i64, i64, i64)> = if let Some(cutoff) = time_cutoff {
+        conn.query_row(sql, rusqlite::params![session_dir, cutoff], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .ok()
+    } else {
+        conn.query_row(sql, rusqlite::params![session_dir], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .ok()
+    };
+
+    let (sessions, input, output, cache_read) = result?;
+    Some(StatsRow {
+        sessions: sessions.max(0) as u64,
+        input: input.max(0) as u64,
+        output: output.max(0) as u64,
+        cache_read: cache_read.max(0) as u64,
+        cost_cents: 0, // GitHub Copilot has no per-token cost
+        cost_str: "$0.00".to_string(),
+    })
+}
+
+/// Run `opencode stats [--project <path>] [--days N]` and parse the output.
 /// Returns None if opencode is not on PATH or produces no output.
-pub fn fetch_stats(project_path: &str, days: Option<u32>) -> Option<StatsRow> {
+/// Used as a fallback / for the global summary.
+#[allow(dead_code)]
+pub fn fetch_stats_cli(project_path: Option<&str>, days: Option<u32>) -> Option<StatsRow> {
     let mut cmd = Command::new("opencode");
-    cmd.arg("stats").arg("--project").arg(project_path);
+    cmd.arg("stats");
+    if let Some(p) = project_path {
+        cmd.arg("--project").arg(p);
+    }
     if let Some(d) = days {
         cmd.arg("--days").arg(d.to_string());
     }

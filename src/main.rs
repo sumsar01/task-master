@@ -12,7 +12,7 @@ mod tmux;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use registry::Registry;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use toml_edit::{value, DocumentMut, Item, Table};
 use tracing::info;
@@ -36,6 +36,9 @@ enum Commands {
         worktree: String,
         /// Prompt / task description to pass to the agent
         prompt: String,
+        /// Reset the worktree even if it has uncommitted changes (discards all local modifications)
+        #[arg(long, default_value_t = false)]
+        force: bool,
     },
     /// Spawn a planning agent to decompose a task into beads issues
     Plan {
@@ -137,7 +140,11 @@ fn main() -> Result<()> {
         _ => {
             let registry = Registry::load(base_dir.clone()).context("Failed to load registry")?;
             match cli.command {
-                Commands::Spawn { worktree, prompt } => cmd_spawn(&registry, &worktree, &prompt),
+                Commands::Spawn {
+                    worktree,
+                    prompt,
+                    force,
+                } => cmd_spawn(&registry, &worktree, &prompt, force),
                 Commands::Plan { worktree, prompt } => {
                     plan::cmd_plan(&registry, &worktree, &prompt)
                 }
@@ -182,6 +189,11 @@ fn build_spawn_prompt(window_name: &str, user_prompt: &str) -> String {
     format!(
         "{user_prompt}
 
+## Starting point
+
+Your worktree has been reset to master. Create a new branch before making any changes:
+  git checkout -b feat/<short-description>
+
 ## PR workflow (MANDATORY)
 
 When you are ready to open a PR, you MUST follow these steps in order:
@@ -204,8 +216,78 @@ your session before the command can return. Always use `task-master notify` inst
     )
 }
 
-fn cmd_spawn(registry: &Registry, window_name: &str, prompt: &str) -> Result<()> {
+/// Reset a worktree to the default branch (master or main) before spawning an agent.
+///
+/// 1. Checks for uncommitted changes via `git status --porcelain`.
+///    - If dirty and `force` is false: returns an error.
+///    - If dirty and `force` is true: hard-resets and cleans the worktree.
+/// 2. Checks out the default branch (tries `master` then `main`).
+/// 3. Runs `git pull --rebase`. If pull fails, prints a warning but returns Ok so
+///    the spawn still proceeds — the repo may be local-only with no remote.
+fn reset_worktree_to_master(path: &Path, force: bool) -> Result<()> {
+    let git = |args: &[&str]| -> Result<String> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .output()
+            .with_context(|| format!("Failed to run: git {}", args.join(" ")))?;
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+
+    let git_ok = |args: &[&str]| -> Result<bool> {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .status()
+            .with_context(|| format!("Failed to run: git {}", args.join(" ")))?;
+        Ok(status.success())
+    };
+
+    // 1. Check for uncommitted changes.
+    let status_output = git(&["status", "--porcelain"])?;
+    if !status_output.is_empty() {
+        if !force {
+            bail!(
+                "Worktree '{}' has uncommitted changes. Clean up first or use --force to discard them.\n{}",
+                path.display(),
+                status_output
+            );
+        }
+        // Hard reset + clean.
+        git_ok(&["checkout", "-f", "HEAD"])?;
+        git_ok(&["clean", "-fd"])?;
+    }
+
+    // 2. Checkout default branch (master, falling back to main).
+    let checked_out = git_ok(&["checkout", "master"])?;
+    if !checked_out {
+        let ok = git_ok(&["checkout", "main"])?;
+        if !ok {
+            bail!(
+                "Could not checkout 'master' or 'main' in worktree '{}'",
+                path.display()
+            );
+        }
+    }
+
+    // 3. Pull to get latest. Non-fatal: warn and continue.
+    let pull_ok = git_ok(&["pull", "--rebase"])?;
+    if !pull_ok {
+        eprintln!(
+            "Warning: git pull --rebase failed in '{}'; continuing on current master.",
+            path.display()
+        );
+    }
+
+    Ok(())
+}
+
+fn cmd_spawn(registry: &Registry, window_name: &str, prompt: &str, force: bool) -> Result<()> {
     let worktree = registry.require_worktree(window_name)?;
+
+    reset_worktree_to_master(&worktree.abs_path, force)?;
 
     let session = tmux::current_session()?;
     let abs_path_str = worktree.abs_path.to_string_lossy().to_string();
@@ -687,6 +769,177 @@ repo = "projects/beta"
         std::fs::write(dir.path().join("task-master.toml"), "not valid toml }{").unwrap();
         let err = Registry::load(dir.path().to_path_buf()).unwrap_err();
         assert!(err.to_string().contains("parse") || err.to_string().contains("TOML"));
+    }
+
+    // -------------------------------------------------------------------------
+    // reset_worktree_to_master
+    // -------------------------------------------------------------------------
+
+    /// Helper: initialise a bare git repo with one commit on master and return
+    /// a linked worktree at `<root>/wt`.
+    fn make_git_worktree(root: &std::path::Path) -> std::path::PathBuf {
+        let bare = root.join("bare.git");
+        let wt = root.join("wt");
+
+        // Init bare repo and make an initial commit so master exists.
+        Command::new("git")
+            .args(["init", "--bare"])
+            .arg(&bare)
+            .status()
+            .unwrap();
+
+        // Clone into a temp checkout so we can commit.
+        let checkout = root.join("checkout");
+        Command::new("git")
+            .args(["clone"])
+            .arg(&bare)
+            .arg(&checkout)
+            .status()
+            .unwrap();
+
+        // Configure git identity for the commit.
+        Command::new("git")
+            .args(["-C"])
+            .arg(&checkout)
+            .args(["config", "user.email", "test@test.com"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["-C"])
+            .arg(&checkout)
+            .args(["config", "user.name", "Test"])
+            .status()
+            .unwrap();
+
+        std::fs::write(checkout.join("init.txt"), "init").unwrap();
+        Command::new("git")
+            .args(["-C"])
+            .arg(&checkout)
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["-C"])
+            .arg(&checkout)
+            .args(["commit", "-m", "init"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["-C"])
+            .arg(&checkout)
+            .args(["push", "origin", "HEAD:master"])
+            .status()
+            .unwrap();
+
+        // Add a worktree linked to the bare repo.
+        Command::new("git")
+            .args(["-C"])
+            .arg(&bare)
+            .args(["worktree", "add"])
+            .arg(&wt)
+            .arg("master")
+            .status()
+            .unwrap();
+
+        // Configure identity in the worktree too (needed for commits there).
+        Command::new("git")
+            .args(["-C"])
+            .arg(&wt)
+            .args(["config", "user.email", "test@test.com"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["-C"])
+            .arg(&wt)
+            .args(["config", "user.name", "Test"])
+            .status()
+            .unwrap();
+
+        wt
+    }
+
+    #[test]
+    fn test_reset_clean_already_on_master() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let wt = make_git_worktree(root.path());
+        let result = reset_worktree_to_master(&wt, false);
+        assert!(
+            result.is_ok(),
+            "clean worktree should reset ok: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_reset_dirty_no_force_returns_error() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let wt = make_git_worktree(root.path());
+        // Create an uncommitted file.
+        std::fs::write(wt.join("dirty.txt"), "dirty").unwrap();
+        let err = reset_worktree_to_master(&wt, false).unwrap_err();
+        assert!(
+            err.to_string().contains("uncommitted changes"),
+            "expected 'uncommitted changes' in error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_reset_dirty_with_force_discards_changes() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let wt = make_git_worktree(root.path());
+        let dirty = wt.join("dirty.txt");
+        std::fs::write(&dirty, "dirty").unwrap();
+        let result = reset_worktree_to_master(&wt, true);
+        assert!(result.is_ok(), "force should succeed: {:?}", result);
+        assert!(
+            !dirty.exists(),
+            "untracked file should have been cleaned up"
+        );
+    }
+
+    #[test]
+    fn test_reset_pull_fails_warns_and_continues() {
+        // A worktree with no remote will have a failing pull; should still return Ok.
+        let root = tempfile::tempdir().expect("tempdir");
+
+        // Init a simple local repo (not bare, no remote).
+        let repo = root.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+
+        // No remote — pull will fail. reset should warn and return Ok.
+        let result = reset_worktree_to_master(&repo, false);
+        assert!(
+            result.is_ok(),
+            "no-remote pull failure should warn+continue: {:?}",
+            result
+        );
     }
 
     #[test]

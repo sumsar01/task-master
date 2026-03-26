@@ -207,13 +207,25 @@ pub fn build_qa_prompt(
 /// The dev window (`WIS-olive:dev`) is renamed to `WIS-olive:qa` and its
 /// running opencode process is replaced with a fresh TUI running the QA prompt.
 /// No separate `-qa` window is created — the lifecycle lives in one window.
-pub fn cmd_qa(registry: &Registry, worktree_name: &str, pr_number: u64) -> Result<()> {
+pub fn cmd_qa(registry: &Registry, worktree_name: &str, pr_number: Option<u64>) -> Result<()> {
     let worktree = registry.require_worktree(worktree_name)?;
 
     let repo_slug = detect_repo_slug(&worktree.abs_path.to_string_lossy())?;
     let branch = detect_branch(&worktree.abs_path.to_string_lossy())?;
     let default_branch = detect_default_branch(&repo_slug);
     let session = tmux::current_session()?;
+
+    // Resolve PR number: use the provided one or auto-detect from the branch.
+    let pr_number = match pr_number {
+        Some(n) => n,
+        None => {
+            info!(
+                "[{}] No PR number given — detecting from branch '{}'",
+                worktree_name, branch
+            );
+            detect_pr_number(&branch)?
+        }
+    };
 
     // The base window name (no phase suffix), e.g. "WIS-olive"
     let base_name = tmux::base_window_name(worktree_name).to_string();
@@ -340,6 +352,50 @@ pub fn detect_branch(worktree_dir: &str) -> Result<String> {
 
     let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
     validate_branch(&raw, worktree_dir)
+}
+
+/// Detect the open PR number for the given branch via `gh pr list`.
+///
+/// Returns an error if no open PR is found or `gh` is unavailable.
+pub fn detect_pr_number(branch: &str) -> Result<u64> {
+    let output = std::process::Command::new("gh")
+        .args([
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--state",
+            "open",
+            "--json",
+            "number",
+            "--jq",
+            ".[0].number",
+        ])
+        .output()
+        .context("Failed to run gh pr list")?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "gh pr list failed for branch '{}': {}",
+            branch,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() || raw == "null" {
+        anyhow::bail!(
+            "No open PR found for branch '{}'. Pass the PR number explicitly.",
+            branch
+        );
+    }
+
+    raw.parse::<u64>().with_context(|| {
+        format!(
+            "Unexpected output from gh pr list for branch '{}': {:?}",
+            branch, raw
+        )
+    })
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 use crate::stats::format_tokens;
-use crate::tui::App;
+use crate::tui::{App, ListEntry};
 use crate::ui::theme::Theme;
 use ansi_to_tui::IntoText;
 use ratatui::{
@@ -137,24 +137,49 @@ fn render_worktree_list(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) {
     let selected = app.list_state.selected();
 
     let items: Vec<ListItem> = app
-        .worktrees
+        .entries
         .iter()
         .enumerate()
-        .map(|(i, wt)| {
-            let phase = app.phases.get(i).map(|s| s.as_str()).unwrap_or("?");
-            let phase_color = t.phase_color(phase);
-            let is_selected = selected == Some(i);
+        .map(|(visual_idx, entry)| {
+            let is_selected = selected == Some(visual_idx);
             let base = if is_selected {
                 t.selection_style()
             } else {
                 Style::default()
             };
 
-            let line = Line::from(vec![
-                Span::styled(format!("{:<20}", wt.window_name), base.fg(t.text)),
-                Span::styled(format!("[{}]", phase), base.fg(phase_color)),
-            ]);
-            ListItem::new(line)
+            match entry {
+                ListEntry::ProjectHeader {
+                    name, collapsed, ..
+                } => {
+                    let icon = if *collapsed { "▶" } else { "▼" };
+                    let line = Line::from(vec![Span::styled(
+                        format!(" {} {} ", icon, name),
+                        base.fg(t.section_header).add_modifier(Modifier::BOLD),
+                    )]);
+                    ListItem::new(line)
+                }
+                ListEntry::Worktree { wt, worktree_idx } => {
+                    let phase = app
+                        .phases
+                        .get(*worktree_idx)
+                        .map(|s| s.as_str())
+                        .unwrap_or("?");
+                    let phase_color = t.phase_color(phase);
+                    let line = Line::from(vec![
+                        Span::styled(format!("    {:<18}", wt.window_name), base.fg(t.text)),
+                        Span::styled(format!("[{}]", phase), base.fg(phase_color)),
+                    ]);
+                    ListItem::new(line)
+                }
+                ListEntry::EmptyProject => {
+                    let line = Line::from(vec![Span::styled(
+                        "    (no worktrees)",
+                        Style::default().fg(t.text_dim),
+                    )]);
+                    ListItem::new(line)
+                }
+            }
         })
         .collect();
 
@@ -244,20 +269,19 @@ fn action_line<'a>(
 
 fn render_preview(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
     // Determine title from selected worktree + phase.
-    let title = match app.list_state.selected() {
-        Some(i) => {
-            let name = app
-                .worktrees
-                .get(i)
-                .map(|w| w.window_name.as_str())
+    let title = match app.selected_worktree() {
+        Some(wt) => {
+            let name = wt.window_name.as_str();
+            let phase = app
+                .selected_worktree_idx()
+                .and_then(|i| app.phases.get(i))
+                .map(|s| s.as_str())
                 .unwrap_or("?");
-            let phase = app.phases.get(i).map(|s| s.as_str()).unwrap_or("?");
-            let scroll_hint = if app.preview_scroll > 0 {
+            if app.preview_scroll > 0 {
                 format!(" {}:{} ↑ scrolled ", name, phase)
             } else {
                 format!(" {}:{} ", name, phase)
-            };
-            scroll_hint
+            }
         }
         None => " Preview ".to_string(),
     };
@@ -381,15 +405,15 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
 }
 
 fn stats_bar_text(app: &App) -> String {
-    let idx = match app.selected() {
+    let wt_idx = match app.selected_worktree_idx() {
         Some(i) => i,
-        None => return " No worktrees".to_string(),
+        None => return " No worktree selected".to_string(),
     };
-    let wt = match app.worktrees.get(idx) {
+    let wt = match app.worktrees.get(wt_idx) {
         Some(w) => w,
         None => return String::new(),
     };
-    match app.stats_cache.get(&idx) {
+    match app.stats_cache.get(&wt_idx) {
         Some(stats) if stats.input > 0 || stats.sessions > 0 => {
             format!(
                 " {}  ·  {} in / {} out  ·  {} sessions",

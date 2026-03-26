@@ -10,9 +10,12 @@ theme = "tokyonight"
 # Each [[projects]] block registers one git repository.
 #
 # Fields:
-#   name   — full repo/directory name under projects/
-#   short  — short prefix used for tmux window names (e.g. "API" → "API-main")
-#   repo   — path relative to this file where the bare repo / worktrees live
+#   name      — full repo/directory name under projects/
+#   short     — short prefix used for tmux window names (e.g. "API" → "API-main")
+#   repo      — path relative to this file where the bare repo / worktrees live
+#   collapsed — (optional) hide the project's worktree rows in the TUI list.
+#               Toggle with Enter/Space when the project header is selected.
+#               The TUI writes this field automatically when you collapse/expand.
 #
 # Each [[projects.worktrees]] block registers one worktree inside that repo.
 #   name   — worktree directory name; also becomes the window suffix

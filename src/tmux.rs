@@ -55,20 +55,30 @@ pub fn find_window_index(session: &str, base_name: &str) -> Option<String> {
     None
 }
 
-/// Return the index of the current tmux window, or error if not inside tmux.
-pub fn current_window_index() -> Result<String> {
-    tmux(&["display-message", "-p", "#I"]).context("Failed to get current tmux window index")
+/// Return the name of the current tmux window, or error if not inside tmux.
+pub fn current_window_name() -> Result<String> {
+    tmux(&["display-message", "-p", "#W"]).context("Failed to get current tmux window name")
 }
 
-/// Re-select the TUI window (identified by index) so that spawning a new worktree
+/// Re-select the TUI window (identified by name) so that spawning a new worktree
 /// window (which uses `new-window -d`) doesn't inadvertently steal focus on
 /// some tmux builds/configs.
-pub fn select_tui_window(session: &str, window_idx: &str) -> Result<()> {
-    let target = format!("{}:{}", session, window_idx);
+///
+/// Uses a dynamic name lookup instead of a cached numeric index, because tmux
+/// renumbers window indices whenever windows are created or destroyed, making a
+/// stale index silently point at the wrong window (or nowhere).
+pub fn select_tui_window(session: &str, window_name: &str) -> Result<()> {
+    let idx = find_window_index(session, window_name).with_context(|| {
+        format!(
+            "TUI window '{}' not found in session '{}'",
+            window_name, session
+        )
+    })?;
+    let target = format!("{}:{}", session, idx);
     tmux(&["select-window", "-t", &target]).with_context(|| {
         format!(
-            "Failed to re-focus TUI window {} in session '{}'",
-            window_idx, session
+            "Failed to re-focus TUI window '{}' (index {}) in session '{}'",
+            window_name, idx, session
         )
     })?;
     Ok(())

@@ -9,6 +9,10 @@ pub struct WorktreeConfig {
     pub name: String,
 }
 
+fn default_collapsed() -> bool {
+    false
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct ProjectConfig {
     pub name: String,
@@ -16,6 +20,9 @@ pub struct ProjectConfig {
     pub repo: String,
     #[serde(default)]
     pub worktrees: Vec<WorktreeConfig>,
+    /// Whether this project's worktree list is collapsed in the TUI.
+    #[serde(default = "default_collapsed")]
+    pub collapsed: bool,
 }
 
 fn default_theme() -> String {
@@ -168,6 +175,40 @@ pub fn write_theme(base_dir: &PathBuf, theme_id: &str) -> Result<()> {
         doc["ui"] = toml_edit::table();
     }
     doc["ui"]["theme"] = toml_edit::value(theme_id);
+
+    fs::write(&config_path, doc.to_string())
+        .with_context(|| format!("Failed to write config: {}", config_path.display()))?;
+    Ok(())
+}
+
+/// Update the `collapsed` key for a specific project in the TOML config file
+/// without disturbing any other content.  If the project is not found the
+/// file is left unchanged and no error is returned.
+pub fn write_collapsed(base_dir: &PathBuf, project_name: &str, collapsed: bool) -> Result<()> {
+    let config_path = base_dir.join("task-master.toml");
+    let contents = fs::read_to_string(&config_path)
+        .with_context(|| format!("Failed to read config: {}", config_path.display()))?;
+
+    let mut doc = contents
+        .parse::<DocumentMut>()
+        .context("Failed to parse task-master.toml")?;
+
+    let projects = match doc["projects"].as_array_of_tables_mut() {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+
+    for proj in projects.iter_mut() {
+        let matches = proj
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|s| s == project_name)
+            .unwrap_or(false);
+        if matches {
+            proj["collapsed"] = toml_edit::value(collapsed);
+            break;
+        }
+    }
 
     fs::write(&config_path, doc.to_string())
         .with_context(|| format!("Failed to write config: {}", config_path.display()))?;

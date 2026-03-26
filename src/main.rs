@@ -74,8 +74,8 @@ enum Commands {
     Qa {
         /// Worktree window name, e.g. WIS-olive
         worktree: String,
-        /// GitHub PR number to review
-        pr_number: u64,
+        /// GitHub PR number to review (auto-detected from current branch if omitted)
+        pr_number: Option<u64>,
     },
     /// Notify the supervisor that a PR is ready for QA (safe to call from inside an agent)
     Notify {

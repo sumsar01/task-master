@@ -52,6 +52,8 @@ pub struct App {
     /// Transient status message and when it was set.
     pub status_msg: Option<(String, Instant)>,
     pub session: String,
+    /// The tmux window index where the TUI is running (used to refocus after spawning).
+    pub tui_window_idx: String,
     pub should_quit: bool,
     /// Track which index was active when we last loaded stats.
     pub last_stats_idx: Option<usize>,
@@ -71,6 +73,16 @@ pub struct App {
     /// Draft saved when the user starts browsing history so Down can restore it.
     pub history_draft: String,
 
+    // ── Agent preview pane ────────────────────────────────────────────────────
+    /// Whether the live agent preview pane is currently shown.
+    pub show_preview: bool,
+    /// Captured lines from `tmux capture-pane` for the selected worktree.
+    pub preview_lines: Vec<String>,
+    /// How many lines from the bottom the user has scrolled (0 = tail/auto).
+    pub preview_scroll: usize,
+    /// Worktree index whose preview is currently cached.
+    pub last_preview_idx: Option<usize>,
+
     // ── Overlays ──────────────────────────────────────────────────────────────
     pub show_theme_picker: bool,
     pub show_help: bool,
@@ -81,7 +93,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(registry: &Registry, session: String) -> Self {
+    pub fn new(registry: &Registry, session: String, tui_window_idx: String) -> Self {
         let worktrees = registry.worktrees.clone();
         let count = worktrees.len();
         let mut list_state = ListState::default();
@@ -102,9 +114,14 @@ impl App {
             stats_cache: HashMap::new(),
             status_msg: None,
             session,
+            tui_window_idx,
             should_quit: false,
             last_stats_idx: None,
             theme,
+            show_preview: false,
+            preview_lines: Vec::new(),
+            preview_scroll: 0,
+            last_preview_idx: None,
             show_theme_picker: false,
             show_help: false,
             theme_picker_cursor,
@@ -171,6 +188,38 @@ impl App {
             let phase = find_live_phase(&self.session, &wt.window_name)
                 .unwrap_or_else(|| "idle".to_string());
             self.phases[i] = phase;
+        }
+        if self.show_preview {
+            self.refresh_preview();
+        }
+    }
+
+    /// Re-capture the selected worktree's tmux pane content.
+    ///
+    /// When `preview_scroll == 0` (auto-tail mode) the scroll position is left
+    /// at 0 so the render always shows the bottom of the output.  When the user
+    /// has scrolled up (`preview_scroll > 0`) the content is refreshed but the
+    /// scroll offset is preserved so they can keep reading history.
+    pub fn refresh_preview(&mut self) {
+        let idx = match self.selected() {
+            Some(i) => i,
+            None => {
+                self.preview_lines.clear();
+                return;
+            }
+        };
+        let wt = match self.worktrees.get(idx) {
+            Some(w) => w.clone(),
+            None => return,
+        };
+        let lines = tmux::capture_pane(&self.session, &wt.window_name)
+            .unwrap_or_default();
+        self.preview_lines = lines;
+        self.last_preview_idx = Some(idx);
+        // Clamp scroll in case the new content is shorter than the previous.
+        let max_scroll = self.preview_lines.len().saturating_sub(1);
+        if self.preview_scroll > max_scroll {
+            self.preview_scroll = 0;
         }
     }
 
@@ -242,15 +291,16 @@ impl App {
 // Entry point
 // ---------------------------------------------------------------------------
 
-/// Open (or focus) a dedicated `task-master` tmux window and run the TUI there.
+/// Open the TUI in the current tmux window (no window switching).
 pub fn cmd_tui(registry: &Registry) -> Result<()> {
     let session = tmux::current_session()
         .context("task-master tui must be run from within a tmux session")?;
 
-    let base_dir = registry.base_dir.to_string_lossy().to_string();
-    ensure_tui_window(&session, &base_dir)?;
+    // Capture the current window index so we can refocus it after spawning
+    // other windows (e.g. via 's', 'p', 'x' keybindings).
+    let tui_window_idx = tmux::current_window_index().unwrap_or_else(|_| "0".to_string());
 
-    let mut app = App::new(registry, session.clone());
+    let mut app = App::new(registry, session.clone(), tui_window_idx);
     app.refresh_phases();
     app.load_stats_for_selected();
 
@@ -269,50 +319,6 @@ pub fn cmd_tui(registry: &Registry) -> Result<()> {
     terminal.show_cursor().ok();
 
     res
-}
-
-fn ensure_tui_window(session: &str, working_dir: &str) -> Result<()> {
-    use std::process::Command;
-
-    let window_name = "task-master";
-
-    if tmux::find_window_index(session, window_name).is_none() {
-        // Create the window at the end, then move it to slot 1.
-        let end_target = format!("{}:", session);
-        let status = Command::new("tmux")
-            .args([
-                "new-window",
-                "-d",
-                "-t",
-                &end_target,
-                "-n",
-                window_name,
-                "-c",
-                working_dir,
-            ])
-            .status()
-            .context("Failed to create task-master tmux window")?;
-        if !status.success() {
-            anyhow::bail!("tmux new-window failed");
-        }
-        // Move it to slot 1, shifting any existing windows up.
-        let src_target = format!("{}:{}", session, window_name);
-        let dst_target = format!("{}:1", session);
-        Command::new("tmux")
-            .args(["move-window", "-r", "-s", &src_target, "-t", &dst_target])
-            .status()
-            .ok(); // best-effort; don't fail the whole TUI if renumbering fails
-    }
-
-    if let Some(idx) = tmux::find_window_index(session, window_name) {
-        let target = format!("{}:{}", session, idx);
-        Command::new("tmux")
-            .args(["select-window", "-t", &target])
-            .status()
-            .context("Failed to focus task-master window")?;
-    }
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -412,10 +418,39 @@ fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()
         KeyCode::Up | KeyCode::Char('k') => {
             app.move_up();
             app.load_stats_for_selected();
+            if app.show_preview {
+                app.preview_scroll = 0;
+                app.refresh_preview();
+            }
         }
         KeyCode::Down | KeyCode::Char('j') => {
             app.move_down();
             app.load_stats_for_selected();
+            if app.show_preview {
+                app.preview_scroll = 0;
+                app.refresh_preview();
+            }
+        }
+        // ── Preview pane ──────────────────────────────────────────────────────
+        KeyCode::Char('w') => {
+            app.show_preview = !app.show_preview;
+            if app.show_preview {
+                app.preview_scroll = 0;
+                app.refresh_preview();
+            }
+        }
+        // Scroll preview up (further into history) — only when preview visible.
+        KeyCode::Char('K') => {
+            if app.show_preview && !app.preview_lines.is_empty() {
+                app.preview_scroll = (app.preview_scroll + 5)
+                    .min(app.preview_lines.len().saturating_sub(1));
+            }
+        }
+        // Scroll preview down (toward tail); 0 = auto-tail.
+        KeyCode::Char('J') => {
+            if app.show_preview {
+                app.preview_scroll = app.preview_scroll.saturating_sub(5);
+            }
         }
         KeyCode::Char('t') => {
             app.open_theme_picker();
@@ -485,7 +520,7 @@ fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()
         }
         KeyCode::Char('v') => match crate::supervise::cmd_supervise(registry) {
             Ok(()) => {
-                let _ = tmux::select_tui_window(&app.session);
+                let _ = tmux::select_tui_window(&app.session, &app.tui_window_idx);
                 app.set_status("Supervisor started in 'supervisor' window.".to_string());
                 app.refresh_phases();
             }
@@ -738,7 +773,7 @@ fn execute_spawn(app: &mut App, registry: &Registry, force: bool) -> Result<()> 
     };
     match crate::cmd_spawn(registry, &wt_name, &prompt, force) {
         Ok(()) => {
-            let _ = tmux::select_tui_window(&app.session);
+            let _ = tmux::select_tui_window(&app.session, &app.tui_window_idx);
             app.set_status(format!("Spawned {}:dev", wt_name));
             push_history(app, &prompt);
             app.mode = Mode::Normal;
@@ -773,7 +808,7 @@ fn execute_plan(app: &mut App, registry: &Registry) -> Result<()> {
     };
     match crate::plan::cmd_plan(registry, &wt_name, &prompt) {
         Ok(()) => {
-            let _ = tmux::select_tui_window(&app.session);
+            let _ = tmux::select_tui_window(&app.session, &app.tui_window_idx);
             app.set_status(format!("Plan agent started in {}:plan", wt_name));
             push_history(app, &prompt);
             app.mode = Mode::Normal;
@@ -806,7 +841,7 @@ fn execute_qa(app: &mut App, registry: &Registry) -> Result<()> {
     };
     match crate::qa::cmd_qa(registry, &wt_name, pr_number) {
         Ok(()) => {
-            let _ = tmux::select_tui_window(&app.session);
+            let _ = tmux::select_tui_window(&app.session, &app.tui_window_idx);
             app.set_status(format!(
                 "QA agent started for {} PR #{}",
                 wt_name, pr_number
@@ -930,7 +965,7 @@ name = "a"
 name = "b"
 "#;
         let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
-        let mut app = App::new(&reg, "test".to_string());
+        let mut app = App::new(&reg, "test".to_string(), "0".to_string());
         app.list_state.select(Some(0));
         app.move_up();
         assert_eq!(app.selected(), Some(1)); // wraps to last
@@ -952,7 +987,7 @@ name = "a"
 name = "b"
 "#;
         let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
-        let mut app = App::new(&reg, "test".to_string());
+        let mut app = App::new(&reg, "test".to_string(), "0".to_string());
         app.list_state.select(Some(1));
         app.move_down();
         assert_eq!(app.selected(), Some(0)); // wraps to first
@@ -972,7 +1007,7 @@ repo = "projects/svc"
 name = "a"
 "#;
         let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
-        let mut app = App::new(&reg, "test".to_string());
+        let mut app = App::new(&reg, "test".to_string(), "0".to_string());
 
         app.set_status("hello");
         assert_eq!(app.current_status(), Some("hello"));
@@ -997,7 +1032,7 @@ repo = "projects/svc"
 name = "alpha"
 "#;
         let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
-        let app = App::new(&reg, "test".to_string());
+        let app = App::new(&reg, "test".to_string(), "0".to_string());
         // Verify the worktree name and empty stats cache.
         let idx = app.selected().unwrap_or(0);
         let wt = &app.worktrees[idx];

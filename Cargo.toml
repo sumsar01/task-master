@@ -9,6 +9,7 @@ toml = "0.8"
 toml_edit = "0.22"
 anyhow = "1"
 ratatui = "0.28"
+ansi-to-tui = "6.0.1"
 crossterm = "0.28"
 rusqlite = { version = "0.31", features = ["bundled"] }
 tracing = "0.1"

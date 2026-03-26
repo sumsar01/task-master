@@ -55,15 +55,20 @@ pub fn find_window_index(session: &str, base_name: &str) -> Option<String> {
     None
 }
 
-/// Re-select the `task-master` TUI window so that spawning a new worktree
+/// Return the index of the current tmux window, or error if not inside tmux.
+pub fn current_window_index() -> Result<String> {
+    tmux(&["display-message", "-p", "#I"]).context("Failed to get current tmux window index")
+}
+
+/// Re-select the TUI window (identified by index) so that spawning a new worktree
 /// window (which uses `new-window -d`) doesn't inadvertently steal focus on
 /// some tmux builds/configs.
-pub fn select_tui_window(session: &str) -> Result<()> {
-    let target = format!("{}:task-master", session);
+pub fn select_tui_window(session: &str, window_idx: &str) -> Result<()> {
+    let target = format!("{}:{}", session, window_idx);
     tmux(&["select-window", "-t", &target]).with_context(|| {
         format!(
-            "Failed to re-focus task-master window in session '{}'",
-            session
+            "Failed to re-focus TUI window {} in session '{}'",
+            window_idx, session
         )
     })?;
     Ok(())
@@ -286,6 +291,77 @@ fn build_opencode_cmd(prompt_file: &str, agent: Option<&str>) -> String {
 
 pub fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Strip the right-hand sidebar column that opencode renders in its two-column
+/// TUI layout. The sidebar is separated from the conversation by a long run of
+/// spaces. We find the first run of 8 or more consecutive spaces starting after
+/// byte position 20 (so short lines and leading indentation are left intact)
+/// and truncate there, then trim any residual trailing whitespace.
+fn strip_sidebar_column(line: &str) -> String {
+    // Work in bytes; the separator is plain ASCII spaces so byte == char here.
+    let search_start = 20.min(line.len());
+    let tail = &line[search_start..];
+
+    // Find 8+ consecutive spaces in the tail.
+    let mut run_start: Option<usize> = None;
+    let mut run_len = 0usize;
+    for (i, b) in tail.bytes().enumerate() {
+        if b == b' ' {
+            if run_start.is_none() {
+                run_start = Some(i);
+            }
+            run_len += 1;
+            if run_len >= 8 {
+                let cut = search_start + run_start.unwrap();
+                return line[..cut].trim_end().to_string();
+            }
+        } else {
+            run_start = None;
+            run_len = 0;
+        }
+    }
+
+    // No wide gap found — just trim trailing whitespace.
+    line.trim_end().to_string()
+}
+
+/// Capture the current visible content of the tmux pane for the given worktree.
+///
+/// Uses `tmux capture-pane -p -e` to preserve ANSI escape sequences (colors,
+/// bold, etc.) so they can be parsed and rendered by the ratatui TUI.
+///
+/// Returns `None` if the window does not exist, tmux is unavailable, or the
+/// capture fails for any reason.
+pub fn capture_pane(session: &str, base_name: &str) -> Option<Vec<String>> {
+    let idx = find_window_index(session, base_name)?;
+    let target = format!("{}:{}", session, idx);
+
+    let output = Command::new("tmux")
+        .args(["capture-pane", "-p", "-e", "-t", &target])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    // opencode renders a two-column TUI: conversation on the left, a sidebar
+    // on the right, separated by a wide run of spaces. Strip the sidebar by
+    // truncating at the first run of 8+ spaces found after column 20, then
+    // trim residual trailing whitespace. The ANSI sequences between the two
+    // columns are plain-space padding (not colored), so byte-level space
+    // detection still works correctly on ANSI-decorated lines.
+    let mut lines: Vec<String> = text.lines().map(|l| strip_sidebar_column(l)).collect();
+    while lines
+        .last()
+        .map(|l: &String| l.trim().is_empty())
+        .unwrap_or(false)
+    {
+        lines.pop();
+    }
+    Some(lines)
 }
 
 #[cfg(test)]

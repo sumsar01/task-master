@@ -65,6 +65,7 @@ fn render_header(f: &mut Frame, area: Rect, t: &Theme) {
         ("x", "qa"),
         ("r", "reset"),
         ("a", "attach"),
+        ("v", "supervise"),
         ("t", "theme"),
         ("?", "help"),
         ("q", "quit"),
@@ -171,6 +172,8 @@ fn render_actions(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
     lines.push(action_line('r', "reset window", has_wt, !active, t));
     lines.push(action_line('a', "attach", has_wt, !active, t));
     lines.push(Line::from(""));
+    lines.push(action_line('v', "supervise", true, false, t));
+    lines.push(Line::from(""));
 
     // Separator
     lines.push(Line::from(Span::styled(
@@ -220,18 +223,19 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
     use crate::tui::Mode;
 
     let (content, style) = match &app.mode {
+        // Prompt mode: the overlay handles all input display. Show a subtle
+        // hint in the status bar so the bottom row isn't blank/confusing.
         Mode::Prompt(crate::tui::ActionKind::Spawn) => (
-            format!(" Prompt: {}_", app.input_buf),
-            t.text_style().fg(t.phase_done),
+            " Spawning prompt…  Esc to cancel".to_string(),
+            t.text_dim_style(),
         ),
         Mode::Prompt(crate::tui::ActionKind::Plan) => (
-            format!(" Task: {}_", app.input_buf),
-            t.text_style().fg(t.phase_done),
+            " Plan prompt…  Esc to cancel".to_string(),
+            t.text_dim_style(),
         ),
-        Mode::Prompt(crate::tui::ActionKind::Qa) => (
-            format!(" PR number: {}_", app.input_buf),
-            t.text_style().fg(t.phase_done),
-        ),
+        Mode::Prompt(crate::tui::ActionKind::Qa) => {
+            (" QA prompt…  Esc to cancel".to_string(), t.text_dim_style())
+        }
         Mode::ForceConfirm => (
             " Press Enter to force-spawn (discards uncommitted changes), Esc to cancel".to_string(),
             t.text_style().fg(t.phase_error),

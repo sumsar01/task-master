@@ -45,6 +45,8 @@ pub struct App {
     pub list_state: ListState,
     pub mode: Mode,
     pub input_buf: String,
+    /// Byte offset of the cursor within `input_buf`.
+    pub cursor_pos: usize,
     /// Stats cache keyed by worktree index; filled lazily on selection change.
     pub stats_cache: HashMap<usize, StatsRow>,
     /// Transient status message and when it was set.
@@ -57,9 +59,17 @@ pub struct App {
     // ── Theme ─────────────────────────────────────────────────────────────────
     pub theme: Theme,
 
-    /// Timestamp of the last key event — used to distinguish a deliberate Enter
-    /// from a newline that arrived as part of a paste burst.
-    pub last_key_at: Instant,
+    /// Timestamp of the last *paste* event — used to distinguish a deliberate
+    /// Enter from a newline that arrived as part of a bracketed-paste burst.
+    pub last_paste_at: Instant,
+
+    // ── Input history ─────────────────────────────────────────────────────────
+    /// Previously submitted prompts, oldest first.
+    pub input_history: Vec<String>,
+    /// Index into `input_history` while browsing with Up/Down; None = not browsing.
+    pub history_idx: Option<usize>,
+    /// Draft saved when the user starts browsing history so Down can restore it.
+    pub history_draft: String,
 
     // ── Overlays ──────────────────────────────────────────────────────────────
     pub show_theme_picker: bool,
@@ -88,6 +98,7 @@ impl App {
             list_state,
             mode: Mode::Normal,
             input_buf: String::new(),
+            cursor_pos: 0,
             stats_cache: HashMap::new(),
             status_msg: None,
             session,
@@ -99,7 +110,10 @@ impl App {
             theme_picker_cursor,
             theme_picker_original: None,
             saved_theme_id: theme_name.clone(),
-            last_key_at: Instant::now(),
+            last_paste_at: Instant::now() - Duration::from_secs(10),
+            input_history: Vec::new(),
+            history_idx: None,
+            history_draft: String::new(),
         }
     }
 
@@ -316,12 +330,14 @@ fn run_loop<B: ratatui::backend::Backend>(
         if event::poll(Duration::from_millis(2000))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    app.last_key_at = Instant::now();
                     handle_key(app, registry, key.code, key.modifiers)?;
                 }
                 Event::Paste(text) => {
                     if matches!(app.mode, Mode::Prompt(_) | Mode::ForceConfirm) {
-                        app.input_buf.push_str(&text);
+                        app.last_paste_at = Instant::now();
+                        // Insert pasted text at cursor position.
+                        app.input_buf.insert_str(app.cursor_pos, &text);
+                        app.cursor_pos += text.len();
                     }
                 }
                 _ => {}
@@ -350,7 +366,7 @@ fn handle_key(
     app: &mut App,
     registry: &Registry,
     code: KeyCode,
-    _modifiers: KeyModifiers,
+    modifiers: KeyModifiers,
 ) -> Result<()> {
     // Theme picker consumes all keys when open.
     if app.show_theme_picker {
@@ -364,7 +380,7 @@ fn handle_key(
 
     match &app.mode.clone() {
         Mode::Normal => handle_normal(app, registry, code),
-        Mode::Prompt(kind) => handle_prompt(app, registry, code, kind.clone()),
+        Mode::Prompt(kind) => handle_prompt(app, registry, code, modifiers, kind.clone()),
         Mode::ForceConfirm => handle_force_confirm(app, registry, code),
     }
 }
@@ -388,7 +404,7 @@ fn handle_theme_picker(app: &mut App, registry: &Registry, code: KeyCode) -> Res
     Ok(())
 }
 
-fn handle_normal(app: &mut App, _registry: &Registry, code: KeyCode) -> Result<()> {
+fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()> {
     match code {
         KeyCode::Char('q') | KeyCode::Char('Q') => {
             app.should_quit = true;
@@ -467,6 +483,14 @@ fn handle_normal(app: &mut App, _registry: &Registry, code: KeyCode) -> Result<(
                 }
             }
         }
+        KeyCode::Char('v') => match crate::supervise::cmd_supervise(registry) {
+            Ok(()) => {
+                let _ = tmux::select_tui_window(&app.session);
+                app.set_status("Supervisor started in 'supervisor' window.".to_string());
+                app.refresh_phases();
+            }
+            Err(e) => app.set_status(format!("Supervise failed: {}", e)),
+        },
         _ => {}
     }
     Ok(())
@@ -476,30 +500,139 @@ fn handle_prompt(
     app: &mut App,
     registry: &Registry,
     code: KeyCode,
+    modifiers: KeyModifiers,
     kind: ActionKind,
 ) -> Result<()> {
+    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+
     match code {
+        // ── Cancel ────────────────────────────────────────────────────────────
         KeyCode::Esc => {
             app.mode = Mode::Normal;
             app.input_buf.clear();
+            app.cursor_pos = 0;
+            app.history_idx = None;
+            app.history_draft.clear();
             app.status_msg = None;
         }
+
+        // ── Submit ────────────────────────────────────────────────────────────
         KeyCode::Enter => {
-            // If a key arrived within 20 ms of the previous one we're almost
-            // certainly inside a paste burst — treat the newline as literal text
-            // rather than a submit trigger.
-            if app.last_key_at.elapsed() < Duration::from_millis(20) {
-                app.input_buf.push('\n');
+            // If a paste event arrived within 50 ms we're almost certainly
+            // inside a bracketed-paste burst — treat the newline as literal
+            // text rather than a submit trigger.
+            if app.last_paste_at.elapsed() < Duration::from_millis(50) {
+                app.input_buf.insert(app.cursor_pos, '\n');
+                app.cursor_pos += 1;
             } else {
                 execute_action(app, registry, &kind, false)?;
             }
         }
+
+        // ── Cursor movement ───────────────────────────────────────────────────
+        KeyCode::Left if ctrl => {
+            // Move to start of previous word.
+            app.cursor_pos = prev_word_boundary(&app.input_buf, app.cursor_pos);
+        }
+        KeyCode::Right if ctrl => {
+            // Move to end of next word.
+            app.cursor_pos = next_word_boundary(&app.input_buf, app.cursor_pos);
+        }
+        KeyCode::Left => {
+            app.cursor_pos = prev_char_boundary(&app.input_buf, app.cursor_pos);
+        }
+        KeyCode::Right => {
+            app.cursor_pos = next_char_boundary(&app.input_buf, app.cursor_pos);
+        }
+        KeyCode::Home => {
+            app.cursor_pos = 0;
+        }
+        KeyCode::End => {
+            app.cursor_pos = app.input_buf.len();
+        }
+
+        // ── Ctrl+A / Ctrl+E ───────────────────────────────────────────────────
+        KeyCode::Char('a') if ctrl => {
+            app.cursor_pos = 0;
+        }
+        KeyCode::Char('e') if ctrl => {
+            app.cursor_pos = app.input_buf.len();
+        }
+
+        // ── Ctrl+U: clear from start to cursor ────────────────────────────────
+        KeyCode::Char('u') if ctrl => {
+            app.input_buf.drain(..app.cursor_pos);
+            app.cursor_pos = 0;
+        }
+
+        // ── Ctrl+W: delete previous word ──────────────────────────────────────
+        KeyCode::Char('w') if ctrl => {
+            let new_pos = prev_word_boundary(&app.input_buf, app.cursor_pos);
+            app.input_buf.drain(new_pos..app.cursor_pos);
+            app.cursor_pos = new_pos;
+        }
+
+        // ── Backspace: delete char before cursor ──────────────────────────────
         KeyCode::Backspace => {
-            app.input_buf.pop();
+            let new_pos = prev_char_boundary(&app.input_buf, app.cursor_pos);
+            if new_pos < app.cursor_pos {
+                app.input_buf.drain(new_pos..app.cursor_pos);
+                app.cursor_pos = new_pos;
+            }
         }
-        KeyCode::Char(c) => {
-            app.input_buf.push(c);
+
+        // ── Delete: delete char after cursor ──────────────────────────────────
+        KeyCode::Delete => {
+            let end = next_char_boundary(&app.input_buf, app.cursor_pos);
+            if end > app.cursor_pos {
+                app.input_buf.drain(app.cursor_pos..end);
+            }
         }
+
+        // ── History: Up/Down ──────────────────────────────────────────────────
+        KeyCode::Up => {
+            let len = app.input_history.len();
+            if len == 0 {
+                return Ok(());
+            }
+            let new_idx = match app.history_idx {
+                None => {
+                    // Save current draft before browsing.
+                    app.history_draft = app.input_buf.clone();
+                    len - 1
+                }
+                Some(0) => 0,
+                Some(i) => i - 1,
+            };
+            app.history_idx = Some(new_idx);
+            app.input_buf = app.input_history[new_idx].clone();
+            app.cursor_pos = app.input_buf.len();
+        }
+        KeyCode::Down => {
+            match app.history_idx {
+                None => {}
+                Some(i) if i + 1 >= app.input_history.len() => {
+                    // Past the end: restore draft.
+                    app.input_buf = app.history_draft.clone();
+                    app.cursor_pos = app.input_buf.len();
+                    app.history_idx = None;
+                }
+                Some(i) => {
+                    app.history_idx = Some(i + 1);
+                    app.input_buf = app.input_history[i + 1].clone();
+                    app.cursor_pos = app.input_buf.len();
+                }
+            }
+        }
+
+        // ── Regular character insertion ────────────────────────────────────────
+        KeyCode::Char(c) if !ctrl => {
+            app.input_buf.insert(app.cursor_pos, c);
+            app.cursor_pos += c.len_utf8();
+            // Typing exits history browsing.
+            app.history_idx = None;
+        }
+
         _ => {}
     }
     Ok(())
@@ -510,6 +643,7 @@ fn handle_force_confirm(app: &mut App, registry: &Registry, code: KeyCode) -> Re
         KeyCode::Esc => {
             app.mode = Mode::Normal;
             app.input_buf.clear();
+            app.cursor_pos = 0;
             app.status_msg = None;
         }
         KeyCode::Enter => {
@@ -518,6 +652,66 @@ fn handle_force_confirm(app: &mut App, registry: &Registry, code: KeyCode) -> Re
         _ => {}
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Cursor helpers
+// ---------------------------------------------------------------------------
+
+/// Returns the byte offset of the previous UTF-8 char boundary before `pos`.
+fn prev_char_boundary(s: &str, pos: usize) -> usize {
+    if pos == 0 {
+        return 0;
+    }
+    let mut p = pos - 1;
+    while p > 0 && !s.is_char_boundary(p) {
+        p -= 1;
+    }
+    p
+}
+
+/// Returns the byte offset of the next UTF-8 char boundary after `pos`.
+fn next_char_boundary(s: &str, pos: usize) -> usize {
+    if pos >= s.len() {
+        return s.len();
+    }
+    let mut p = pos + 1;
+    while p < s.len() && !s.is_char_boundary(p) {
+        p += 1;
+    }
+    p
+}
+
+/// Returns the byte offset of the start of the previous word (skips trailing
+/// whitespace then alphanumeric chars).
+fn prev_word_boundary(s: &str, pos: usize) -> usize {
+    let bytes = s.as_bytes();
+    let mut p = pos;
+    // Skip whitespace backwards.
+    while p > 0 && (bytes[p - 1] as char).is_whitespace() {
+        p -= 1;
+    }
+    // Skip non-whitespace backwards.
+    while p > 0 && !(bytes[p - 1] as char).is_whitespace() {
+        p -= 1;
+    }
+    p
+}
+
+/// Returns the byte offset just past the end of the next word.
+fn next_word_boundary(s: &str, pos: usize) -> usize {
+    let bytes = s.as_bytes();
+    let len = s.len();
+    let mut p = pos;
+    // Skip whitespace forwards.
+    while p < len && (bytes[p] as char).is_whitespace() {
+        p += 1;
+    }
+    // Skip non-whitespace forwards.
+    while p < len && !(bytes[p] as char).is_whitespace() {
+        p += 1;
+    }
+    p
 }
 
 // ---------------------------------------------------------------------------
@@ -546,8 +740,11 @@ fn execute_spawn(app: &mut App, registry: &Registry, force: bool) -> Result<()> 
         Ok(()) => {
             let _ = tmux::select_tui_window(&app.session);
             app.set_status(format!("Spawned {}:dev", wt_name));
+            push_history(app, &prompt);
             app.mode = Mode::Normal;
             app.input_buf.clear();
+            app.cursor_pos = 0;
+            app.history_idx = None;
             app.refresh_phases();
         }
         Err(e) => {
@@ -562,6 +759,7 @@ fn execute_spawn(app: &mut App, registry: &Registry, force: bool) -> Result<()> 
                 app.set_status(format!("Spawn failed: {}", msg));
                 app.mode = Mode::Normal;
                 app.input_buf.clear();
+                app.cursor_pos = 0;
             }
         }
     }
@@ -577,14 +775,18 @@ fn execute_plan(app: &mut App, registry: &Registry) -> Result<()> {
         Ok(()) => {
             let _ = tmux::select_tui_window(&app.session);
             app.set_status(format!("Plan agent started in {}:plan", wt_name));
+            push_history(app, &prompt);
             app.mode = Mode::Normal;
             app.input_buf.clear();
+            app.cursor_pos = 0;
+            app.history_idx = None;
             app.refresh_phases();
         }
         Err(e) => {
             app.set_status(format!("Plan failed: {}", e));
             app.mode = Mode::Normal;
             app.input_buf.clear();
+            app.cursor_pos = 0;
         }
     }
     Ok(())
@@ -609,17 +811,35 @@ fn execute_qa(app: &mut App, registry: &Registry) -> Result<()> {
                 "QA agent started for {} PR #{}",
                 wt_name, pr_number
             ));
+            let hist_entry = app.input_buf.trim().to_string();
+            push_history(app, &hist_entry);
             app.mode = Mode::Normal;
             app.input_buf.clear();
+            app.cursor_pos = 0;
+            app.history_idx = None;
             app.refresh_phases();
         }
         Err(e) => {
             app.set_status(format!("QA failed: {}", e));
             app.mode = Mode::Normal;
             app.input_buf.clear();
+            app.cursor_pos = 0;
         }
     }
     Ok(())
+}
+
+fn push_history(app: &mut App, text: &str) {
+    let trimmed = text.trim().to_string();
+    if trimmed.is_empty() {
+        return;
+    }
+    // Avoid consecutive duplicates.
+    if app.input_history.last().map(|s| s.as_str()) != Some(&trimmed) {
+        app.input_history.push(trimmed);
+    }
+    app.history_idx = None;
+    app.history_draft.clear();
 }
 
 fn collect_spawn_inputs(app: &mut App) -> Option<(String, String)> {

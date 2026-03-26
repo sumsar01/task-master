@@ -1,5 +1,6 @@
 pub mod help;
 pub mod main_screen;
+pub mod prompt;
 pub mod theme;
 pub mod theme_picker;
 
@@ -24,5 +25,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
     }
     if app.show_theme_picker {
         theme_picker::render(f, app, &t);
+    }
+
+    // Prompt overlay is shown when the user is typing a command.
+    if matches!(app.mode, crate::tui::Mode::Prompt(_)) {
+        prompt::render(f, app, &t);
     }
 }

@@ -1,9 +1,10 @@
 use crate::stats::format_tokens;
 use crate::tui::App;
 use crate::ui::theme::Theme;
+use ansi_to_tui::IntoText;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame,
@@ -66,6 +67,7 @@ fn render_header(f: &mut Frame, area: Rect, t: &Theme) {
         ("r", "reset"),
         ("a", "attach"),
         ("v", "supervise"),
+        ("w", "preview"),
         ("t", "theme"),
         ("?", "help"),
         ("q", "quit"),
@@ -87,6 +89,11 @@ fn render_header(f: &mut Frame, area: Rect, t: &Theme) {
 // Content: responsive two-panel layout
 // ---------------------------------------------------------------------------
 
+/// Number of lines the Actions panel body occupies (excluding its border).
+/// Keep in sync with `render_actions` content. Border adds 2, so the block
+/// height passed to `Constraint::Length` is ACTIONS_LINES + 2.
+const ACTIONS_LINES: u16 = 17;
+
 fn render_content(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) {
     let (left_pct, right_pct) = if area.width >= SPLIT_THRESHOLD {
         (50, 50)
@@ -103,7 +110,19 @@ fn render_content(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) {
         .split(area);
 
     render_worktree_list(f, cols[0], app, t);
-    render_actions(f, cols[1], app, t);
+
+    if app.show_preview {
+        // Split the right column: Actions at natural height, preview fills rest.
+        let actions_height = (ACTIONS_LINES + 2).min(cols[1].height);
+        let right_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(actions_height), Constraint::Min(0)])
+            .split(cols[1]);
+        render_actions(f, right_rows[0], app, t);
+        render_preview(f, right_rows[1], app, t);
+    } else {
+        render_actions(f, cols[1], app, t);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +232,119 @@ fn action_line<'a>(
             Span::styled(label, t.text_style()),
         ])
     }
+}
+
+// ---------------------------------------------------------------------------
+// Agent preview pane
+// ---------------------------------------------------------------------------
+
+fn render_preview(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
+    // Determine title from selected worktree + phase.
+    let title = match app.list_state.selected() {
+        Some(i) => {
+            let name = app
+                .worktrees
+                .get(i)
+                .map(|w| w.window_name.as_str())
+                .unwrap_or("?");
+            let phase = app.phases.get(i).map(|s| s.as_str()).unwrap_or("?");
+            let scroll_hint = if app.preview_scroll > 0 {
+                format!(" {}:{} ↑ scrolled ", name, phase)
+            } else {
+                format!(" {}:{} ", name, phase)
+            };
+            scroll_hint
+        }
+        None => " Preview ".to_string(),
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(t.border_style())
+        .title(Span::styled(title, t.title_style()));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if app.preview_lines.is_empty() {
+        let msg = Paragraph::new(Span::styled(
+            "  No output captured — window may be idle or not open",
+            t.text_dim_style(),
+        ));
+        f.render_widget(msg, inner);
+        return;
+    }
+
+    // Visible height determines how many lines we can show.
+    let visible = inner.height as usize;
+    if visible == 0 {
+        return;
+    }
+
+    let total = app.preview_lines.len();
+
+    // `preview_scroll` counts lines from the bottom (0 = tail).
+    // Compute the index of the first visible line.
+    let bottom_line = total.saturating_sub(app.preview_scroll);
+    let first_line = bottom_line.saturating_sub(visible);
+    let slice = &app.preview_lines[first_line..bottom_line];
+
+    // Parse each line's ANSI escape sequences into ratatui spans, then apply
+    // color normalization:
+    //   - Strip background colors (they clash with the task-master theme bg).
+    //   - Remap near-white foreground colors (R+G+B > 570) to the theme text
+    //     color. opencode uses near-white (238,238,238) / white (255,255,255)
+    //     for most body text — on our themed background that stays readable,
+    //     but remapping to the theme color makes it look native.
+    //   - All structural colors (greens, yellows, blues, reds, dim greys) have
+    //     R+G+B ≤ 531 and are left untouched.
+    let theme_fg = t.text;
+    let lines: Vec<Line> = slice
+        .iter()
+        .flat_map(|raw| {
+            match raw.as_bytes().into_text() {
+                Ok(text) => text
+                    .lines
+                    .into_iter()
+                    .map(|line| {
+                        let spans = line
+                            .spans
+                            .into_iter()
+                            .map(|span| {
+                                let style = normalize_ansi_style(span.style, theme_fg);
+                                Span::styled(span.content, style)
+                            })
+                            .collect::<Vec<_>>();
+                        Line::from(spans)
+                    })
+                    .collect::<Vec<_>>(),
+                Err(_) => {
+                    // Fallback: render as plain themed text.
+                    vec![Line::from(Span::styled(raw.clone(), t.text_style()))]
+                }
+            }
+        })
+        .collect();
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Normalize a span's style for rendering inside the preview pane:
+/// - Remove background color (avoids clashing with the task-master theme).
+/// - Remap near-white foreground (R+G+B > 570) to the theme's text color so
+///   body text looks native rather than washed-out bright white.
+fn normalize_ansi_style(mut style: Style, theme_fg: Color) -> Style {
+    // Strip background.
+    style.bg = None;
+
+    // Remap near-white foreground to theme color.
+    if let Some(Color::Rgb(r, g, b)) = style.fg {
+        if (r as u16) + (g as u16) + (b as u16) > 570 {
+            style.fg = Some(theme_fg);
+        }
+    }
+
+    style
 }
 
 // ---------------------------------------------------------------------------

@@ -12,6 +12,10 @@ use ratatui::{
 
 const SPLIT_THRESHOLD: u16 = 160;
 
+/// Background color for the agent preview pane — always dark regardless of
+/// the active theme, giving the pane a consistent "embedded terminal" look.
+const PREVIEW_BG: Color = Color::Rgb(10, 10, 16);
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -266,6 +270,13 @@ fn render_preview(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    // Fill the preview interior with a fixed dark background so opencode's
+    // ANSI colors (designed for a dark canvas) read correctly on any theme.
+    f.render_widget(
+        Block::default().style(Style::default().bg(PREVIEW_BG)),
+        inner,
+    );
+
     if app.preview_lines.is_empty() {
         let msg = Paragraph::new(Span::styled(
             "  No output captured — window may be idle or not open",
@@ -289,16 +300,11 @@ fn render_preview(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
     let first_line = bottom_line.saturating_sub(visible);
     let slice = &app.preview_lines[first_line..bottom_line];
 
-    // Parse each line's ANSI escape sequences into ratatui spans, then apply
-    // color normalization:
-    //   - Strip background colors (they clash with the task-master theme bg).
-    //   - Remap near-white foreground colors (R+G+B > 570) to the theme text
-    //     color. opencode uses near-white (238,238,238) / white (255,255,255)
-    //     for most body text — on our themed background that stays readable,
-    //     but remapping to the theme color makes it look native.
-    //   - All structural colors (greens, yellows, blues, reds, dim greys) have
-    //     R+G+B ≤ 531 and are left untouched.
-    let theme_fg = t.text;
+    // Parse each line's ANSI escape sequences into ratatui spans, then strip
+    // background colors — the pane has its own uniform dark bg, so per-span
+    // backgrounds from opencode would create patchy rectangles. Foreground
+    // colors (greens, yellows, blues, reds, dim greys, near-whites) all read
+    // fine on the dark canvas and are left untouched.
     let lines: Vec<Line> = slice
         .iter()
         .flat_map(|raw| {
@@ -311,7 +317,7 @@ fn render_preview(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
                             .spans
                             .into_iter()
                             .map(|span| {
-                                let style = normalize_ansi_style(span.style, theme_fg);
+                                let style = normalize_ansi_style(span.style);
                                 Span::styled(span.content, style)
                             })
                             .collect::<Vec<_>>();
@@ -330,20 +336,10 @@ fn render_preview(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
 }
 
 /// Normalize a span's style for rendering inside the preview pane:
-/// - Remove background color (avoids clashing with the task-master theme).
-/// - Remap near-white foreground (R+G+B > 570) to the theme's text color so
-///   body text looks native rather than washed-out bright white.
-fn normalize_ansi_style(mut style: Style, theme_fg: Color) -> Style {
-    // Strip background.
+/// - Remove background color — the pane fills its own dark bg uniformly,
+///   so per-span backgrounds from opencode would create patchy rectangles.
+fn normalize_ansi_style(mut style: Style) -> Style {
     style.bg = None;
-
-    // Remap near-white foreground to theme color.
-    if let Some(Color::Rgb(r, g, b)) = style.fg {
-        if (r as u16) + (g as u16) + (b as u16) > 570 {
-            style.fg = Some(theme_fg);
-        }
-    }
-
     style
 }
 

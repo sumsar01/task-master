@@ -27,8 +27,12 @@ pub fn render(f: &mut Frame, app: &mut App) {
         theme_picker::render(f, app, &t);
     }
 
-    // Prompt overlay is shown when the user is typing a command.
-    if matches!(app.mode, crate::tui::Mode::Prompt(_)) {
+    // Prompt overlay is shown when the user is typing a command, and also in
+    // ForceConfirm so the user can see what they're about to confirm.
+    if matches!(
+        app.mode,
+        crate::tui::Mode::Prompt(_) | crate::tui::Mode::ForceConfirm
+    ) {
         prompt::render(f, app, &t);
     }
 }

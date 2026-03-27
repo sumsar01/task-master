@@ -207,7 +207,7 @@ pub fn build_qa_prompt(
 /// The dev window (`WIS-olive:dev`) is renamed to `WIS-olive:qa` and its
 /// running opencode process is replaced with a fresh TUI running the QA prompt.
 /// No separate `-qa` window is created — the lifecycle lives in one window.
-pub fn cmd_qa(registry: &Registry, worktree_name: &str, pr_number: Option<u64>) -> Result<()> {
+pub fn cmd_qa(registry: &Registry, worktree_name: &str, pr_number: Option<u64>) -> Result<String> {
     let worktree = registry.require_worktree(worktree_name)?;
 
     let repo_slug = detect_repo_slug(&worktree.abs_path.to_string_lossy())?;
@@ -245,18 +245,22 @@ pub fn cmd_qa(registry: &Registry, worktree_name: &str, pr_number: Option<u64>) 
         base_name, pr_number, session
     );
 
-    // Transition: WIS-olive:dev -> WIS-olive:qa
-    tmux::set_window_phase(&session, &base_name, Some("qa"))?;
+    let window_exists = tmux::find_window_index(&session, &base_name).is_some();
 
-    // Replace the dev agent with a fresh opencode TUI running the QA prompt.
-    tmux::replace_window_process(&session, &base_name, &abs_path_str, &prompt, None)?;
+    if window_exists {
+        // Transition: WIS-olive:dev -> WIS-olive:qa (or overwrite any existing phase)
+        tmux::set_window_phase(&session, &base_name, Some("qa"))?;
+        // Replace whatever is running with a fresh opencode TUI running the QA prompt.
+        tmux::replace_window_process(&session, &base_name, &abs_path_str, &prompt, None)?;
+    } else {
+        // No window yet — create it directly in :qa phase.
+        tmux::spawn_window(&session, &base_name, &abs_path_str, &prompt, Some("qa"))?;
+    }
 
-    println!(
+    Ok(format!(
         "QA agent started for '{}' (PR #{}) — window is now '{}:qa'.",
         base_name, pr_number, base_name
-    );
-
-    Ok(())
+    ))
 }
 
 pub fn detect_repo_slug(worktree_dir: &str) -> Result<String> {

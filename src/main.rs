@@ -16,6 +16,7 @@ use clap::{Parser, Subcommand};
 use registry::Registry;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use toml_edit::{value, DocumentMut, Item, Table};
 use tracing::info;
 
@@ -84,6 +85,13 @@ enum Commands {
         /// GitHub PR number that is ready for QA
         pr_number: u64,
     },
+    /// Send a prompt directly to the running opencode session in a worktree window
+    Send {
+        /// Worktree window name, e.g. WIS-olive
+        worktree: String,
+        /// Prompt text to send to the running opencode TUI
+        prompt: String,
+    },
     /// Spawn an e2e validation agent for a worktree's deployed PR
     E2e {
         /// Worktree window name, e.g. WIS-olive
@@ -121,14 +129,41 @@ enum Commands {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
     let cli = Cli::parse();
+
+    // When running the TUI, redirect tracing output to /tmp/task-master.log so
+    // log lines don't corrupt the ratatui alternate-screen buffer.
+    let is_tui = matches!(cli.command, Commands::Tui);
+    if is_tui {
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/task-master.log")
+            .context("Failed to open /tmp/task-master.log")?;
+        let log_file = Arc::new(Mutex::new(log_file));
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+            )
+            .with_writer(move || {
+                // Return a clone of the Arc-wrapped file each time a writer is needed.
+                log_file
+                    .lock()
+                    .expect("log file lock poisoned")
+                    .try_clone()
+                    .expect("failed to clone log file handle")
+            })
+            .with_ansi(false)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+            )
+            .init();
+    }
 
     let base_dir = cli
         .dir
@@ -148,9 +183,9 @@ fn main() -> Result<()> {
                     worktree,
                     prompt,
                     force,
-                } => cmd_spawn(&registry, &worktree, &prompt, force),
+                } => cmd_spawn(&registry, &worktree, &prompt, force).map(|msg| println!("{}", msg)),
                 Commands::Plan { worktree, prompt } => {
-                    plan::cmd_plan(&registry, &worktree, &prompt)
+                    plan::cmd_plan(&registry, &worktree, &prompt).map(|msg| println!("{}", msg))
                 }
                 Commands::List => cmd_list(&registry),
                 Commands::AddWorktree {
@@ -161,11 +196,12 @@ fn main() -> Result<()> {
                 Commands::Qa {
                     worktree,
                     pr_number,
-                } => qa::cmd_qa(&registry, &worktree, pr_number),
+                } => qa::cmd_qa(&registry, &worktree, pr_number).map(|msg| println!("{}", msg)),
                 Commands::Notify {
                     worktree,
                     pr_number,
                 } => notify::cmd_notify(&registry, &worktree, pr_number),
+                Commands::Send { worktree, prompt } => cmd_send(&registry, &worktree, &prompt),
                 Commands::E2e {
                     worktree,
                     pr_number,
@@ -221,14 +257,24 @@ your session before the command can return. Always use `task-master notify` inst
     )
 }
 
-/// Reset a worktree to the default branch (master or main) before spawning an agent.
+/// Reset a worktree to a clean state at the tip of the default branch (master or main)
+/// before spawning an agent.
+///
+/// Works with both regular clones and bare-repo git worktrees.  In bare-repo setups
+/// the same branch cannot be checked out in two worktrees simultaneously, so we avoid
+/// `git checkout <branch>` in favour of `git reset --hard origin/<branch>` which resets
+/// the working tree to master's content without needing to switch branches.
 ///
 /// 1. Checks for uncommitted changes via `git status --porcelain`.
 ///    - If dirty and `force` is false: returns an error.
 ///    - If dirty and `force` is true: hard-resets and cleans the worktree.
-/// 2. Checks out the default branch (tries `master` then `main`).
-/// 3. Runs `git pull --rebase`. If pull fails, prints a warning but returns Ok so
-///    the spawn still proceeds — the repo may be local-only with no remote.
+/// 2. Fetches from origin (non-fatal — repo may be local-only with no remote).
+/// 3. Tries `git checkout master` (or `main`) first (works in plain clones and when
+///    the worktree is already on that branch).  If checkout fails because the branch
+///    is locked in another worktree (bare repo setup), falls back to
+///    `git reset --hard origin/master` (or `origin/main`) so the content matches
+///    master without requiring a branch switch.
+/// 4. Cleans untracked files so the agent starts on a pristine state.
 fn reset_worktree_to_master(path: &Path, force: bool) -> Result<()> {
     let git = |args: &[&str]| -> Result<String> {
         let out = Command::new("git")
@@ -265,31 +311,65 @@ fn reset_worktree_to_master(path: &Path, force: bool) -> Result<()> {
         git_ok(&["clean", "-fd"])?;
     }
 
-    // 2. Checkout default branch (master, falling back to main).
-    let checked_out = git_ok(&["checkout", "master"])?;
-    if !checked_out {
-        let ok = git_ok(&["checkout", "main"])?;
-        if !ok {
+    // 2. Fetch latest from remote (non-fatal).
+    if !git_ok(&["fetch", "origin"])? {
+        eprintln!(
+            "Warning: git fetch failed in '{}'; will reset to local branch tip.",
+            path.display()
+        );
+    }
+
+    // 3. Reset to master (or main) at origin.
+    //
+    // Strategy A: try `git checkout <branch>` — works in plain clones and when the
+    //             worktree is already on that branch (bare repo case where the branch
+    //             isn't locked by another worktree).
+    // Strategy B: if checkout fails (e.g. bare repo — "branch already used by worktree"),
+    //             fall back to `git reset --hard origin/<branch>`, which resets content
+    //             without needing to switch the branch name.
+    let reset_to_master = |branch: &str| -> Result<bool> {
+        // Try direct checkout first.
+        if git_ok(&["checkout", branch])? {
+            // Bring the branch up to date with origin now that we fetched.
+            if !git_ok(&["reset", "--hard", &format!("origin/{}", branch)])? {
+                eprintln!(
+                    "Warning: git reset --hard origin/{} failed; using local tip.",
+                    branch
+                );
+            }
+            return Ok(true);
+        }
+        // Checkout failed — try hard-reset to remote ref (bare-repo worktree path).
+        let remote_ref = format!("origin/{}", branch);
+        if git_ok(&["reset", "--hard", &remote_ref])? {
+            return Ok(true);
+        }
+        // Neither worked for this branch name.
+        Ok(false)
+    };
+
+    if !reset_to_master("master")? {
+        if !reset_to_master("main")? {
             bail!(
-                "Could not checkout 'master' or 'main' in worktree '{}'",
+                "Could not reset worktree '{}' to 'master' or 'main'. \
+                 Make sure the default branch exists and origin is reachable.",
                 path.display()
             );
         }
     }
 
-    // 3. Pull to get latest. Non-fatal: warn and continue.
-    let pull_ok = git_ok(&["pull", "--rebase"])?;
-    if !pull_ok {
-        eprintln!(
-            "Warning: git pull --rebase failed in '{}'; continuing on current master.",
-            path.display()
-        );
-    }
+    // 4. Remove untracked files so the agent starts clean.
+    git_ok(&["clean", "-fd"])?;
 
     Ok(())
 }
 
-pub fn cmd_spawn(registry: &Registry, window_name: &str, prompt: &str, force: bool) -> Result<()> {
+pub fn cmd_spawn(
+    registry: &Registry,
+    window_name: &str,
+    prompt: &str,
+    force: bool,
+) -> Result<String> {
     let worktree = registry.require_worktree(window_name)?;
 
     reset_worktree_to_master(&worktree.abs_path, force)?;
@@ -322,16 +402,15 @@ pub fn cmd_spawn(registry: &Registry, window_name: &str, prompt: &str, force: bo
     // Ensure :dev phase on new windows too (spawn_window sets it but be explicit).
     tmux::set_window_phase(&session, base_name, Some("dev"))?;
 
-    if is_new {
-        println!("Spawned '{}:dev' in a new window.", base_name);
+    let msg = if is_new {
+        format!("Spawned '{}:dev' in a new window.", base_name)
     } else {
-        println!(
+        format!(
             "Replaced existing '{}' window with fresh dev session (now '{}:dev').",
             base_name, base_name
-        );
-    }
-
-    Ok(())
+        )
+    };
+    Ok(msg)
 }
 
 // ---------------------------------------------------------------------------
@@ -506,6 +585,19 @@ pub fn cmd_reset(worktree: &str) -> Result<()> {
     let base = tmux::base_window_name(worktree);
     tmux::set_window_phase(&session, base, None)?;
     println!("Reset '{}' to idle.", base);
+    Ok(())
+}
+
+/// Send a prompt directly to the running opencode session in a worktree window.
+///
+/// Unlike `cmd_spawn`, this does **not** reset the branch, does not kill the
+/// existing session, and does not append any PR-workflow boilerplate. It is the
+/// equivalent of the user typing the prompt into the opencode TUI by hand.
+pub fn cmd_send(registry: &Registry, worktree_name: &str, prompt: &str) -> Result<()> {
+    let wt = registry.require_worktree(worktree_name)?;
+    let session = tmux::current_session()?;
+    tmux::send_to_window(&session, &wt.window_name, prompt)?;
+    println!("Sent to '{}': {}", wt.window_name, prompt);
     Ok(())
 }
 

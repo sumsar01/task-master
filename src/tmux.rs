@@ -167,6 +167,26 @@ pub fn replace_window_process(
     Ok(())
 }
 
+/// Send a prompt to the running opencode TUI in an existing window.
+///
+/// Finds the window by its base name (ignoring any phase suffix such as `:dev`
+/// or `:qa`), then sends the prompt text followed by Enter — exactly as if the
+/// user had typed it into the TUI input box.
+///
+/// Returns an error if no window with the given base name exists.
+pub fn send_to_window(session: &str, base_name: &str, prompt: &str) -> Result<()> {
+    let idx = find_window_index(session, base_name).with_context(|| {
+        format!(
+            "No tmux window found for '{}' in session '{}'. Is an opencode session running?",
+            base_name, session
+        )
+    })?;
+    let target = format!("{}:{}", session, idx);
+    tmux(&["send-keys", "-t", &target, prompt])?;
+    tmux(&["send-keys", "-t", &target, "Enter"])?;
+    Ok(())
+}
+
 /// Spawn an opencode agent for a worktree.
 ///
 /// `window_name` must be the **base** name (no phase suffix), e.g. "WIS-olive".

@@ -96,7 +96,7 @@ fn render_header(f: &mut Frame, area: Rect, t: &Theme) {
 /// Number of lines the Actions panel body occupies (excluding its border).
 /// Keep in sync with `render_actions` content. Border adds 2, so the block
 /// height passed to `Constraint::Length` is ACTIONS_LINES + 2.
-const ACTIONS_LINES: u16 = 17;
+const ACTIONS_LINES: u16 = 18;
 
 fn render_content(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) {
     let (left_pct, right_pct) = if area.width >= SPLIT_THRESHOLD {
@@ -216,6 +216,7 @@ fn render_actions(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
     lines.push(action_line('p', &plan_label, has_wt, false, t));
     lines.push(Line::from(""));
     lines.push(action_line('x', "qa  (enter PR #)", has_wt, !active, t));
+    lines.push(action_line('m', "send message", has_wt, !active, t));
     lines.push(Line::from(""));
     lines.push(action_line('r', "reset window", has_wt, !active, t));
     lines.push(action_line('a', "attach", has_wt, !active, t));
@@ -388,6 +389,10 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
         Mode::Prompt(crate::tui::ActionKind::Qa) => {
             (" QA prompt…  Esc to cancel".to_string(), t.text_dim_style())
         }
+        Mode::Prompt(crate::tui::ActionKind::Send) => (
+            " Send message…  Esc to cancel".to_string(),
+            t.text_dim_style(),
+        ),
         Mode::ForceConfirm => (
             " Press Enter to force-spawn (discards uncommitted changes), Esc to cancel".to_string(),
             t.text_style().fg(t.phase_error),

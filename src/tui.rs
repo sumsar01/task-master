@@ -54,6 +54,7 @@ pub enum ActionKind {
     Spawn,
     Plan,
     Qa,
+    Send,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -98,6 +99,10 @@ pub struct App {
     /// Timestamp of the last *paste* event — used to distinguish a deliberate
     /// Enter from a newline that arrived as part of a bracketed-paste burst.
     pub last_paste_at: Instant,
+
+    /// Timestamp of the last *key* event — used to detect rapid-fire key bursts
+    /// that arrive when the terminal doesn't honor bracketed paste mode.
+    pub last_key_at: Instant,
 
     // ── Input history ─────────────────────────────────────────────────────────
     /// Previously submitted prompts, oldest first.
@@ -172,6 +177,7 @@ impl App {
             theme_picker_original: None,
             saved_theme_id: theme_name.clone(),
             last_paste_at: Instant::now() - Duration::from_secs(10),
+            last_key_at: Instant::now() - Duration::from_secs(10),
             input_history: Vec::new(),
             history_idx: None,
             history_draft: String::new(),
@@ -496,19 +502,48 @@ fn run_loop<B: ratatui::backend::Backend>(
         terminal.draw(|f| render(f, app))?;
 
         if event::poll(Duration::from_millis(2000))? {
-            match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    handle_key(app, registry, key.code, key.modifiers)?;
-                }
-                Event::Paste(text) => {
-                    if matches!(app.mode, Mode::Prompt(_) | Mode::ForceConfirm) {
-                        app.last_paste_at = Instant::now();
-                        // Insert pasted text at cursor position.
-                        app.input_buf.insert_str(app.cursor_pos, &text);
-                        app.cursor_pos += text.len();
+            // Collect the first event, then drain any immediately-available
+            // follow-on events (zero-timeout poll).  This lets us detect a
+            // burst of Key(Char) events that the terminal fired instead of
+            // a single bracketed-paste Event::Paste.
+            let mut events = vec![event::read()?];
+            while event::poll(Duration::ZERO)? {
+                events.push(event::read()?);
+            }
+
+            // If we're in a text-input mode and there's a multi-event burst
+            // that looks like individual characters (no real Paste event),
+            // synthesize a single paste string so they are inserted atomically
+            // rather than triggering key-binding side effects one by one.
+            let in_input_mode = matches!(app.mode, Mode::Prompt(_) | Mode::ForceConfirm);
+            if in_input_mode {
+                if let Some(text) = collect_char_burst(&events) {
+                    app.last_paste_at = Instant::now();
+                    app.input_buf.insert_str(app.cursor_pos, &text);
+                    app.cursor_pos += text.len();
+                    if app.should_quit {
+                        break;
                     }
+                    continue;
                 }
-                _ => {}
+            }
+
+            for ev in events {
+                match ev {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        app.last_key_at = Instant::now();
+                        handle_key(app, registry, key.code, key.modifiers)?;
+                    }
+                    Event::Paste(text) => {
+                        if matches!(app.mode, Mode::Prompt(_) | Mode::ForceConfirm) {
+                            app.last_paste_at = Instant::now();
+                            // Insert pasted text at cursor position.
+                            app.input_buf.insert_str(app.cursor_pos, &text);
+                            app.cursor_pos += text.len();
+                        }
+                    }
+                    _ => {}
+                }
             }
         } else {
             // Timeout: refresh phases.
@@ -520,6 +555,54 @@ fn run_loop<B: ratatui::backend::Backend>(
         }
     }
     Ok(())
+}
+
+/// Inspect a batch of events and, if they look like a paste burst (≥ 3 events
+/// that are all printable Key(Char) or Key(Enter)), collect them into a String.
+///
+/// Returns `None` if:
+/// - There is already a real `Event::Paste` in the batch (let that be handled normally).
+/// - The batch has fewer than 3 events (could be deliberate rapid typing).
+/// - Any event is a non-character key like Ctrl+C, Escape, arrow keys, etc.
+fn collect_char_burst(events: &[Event]) -> Option<String> {
+    // If there's already a proper paste event, don't interfere.
+    if events.iter().any(|e| matches!(e, Event::Paste(_))) {
+        return None;
+    }
+    // Need at least 3 events to confidently call it a paste burst.
+    if events.len() < 3 {
+        return None;
+    }
+    // Every event must be a printable Key(Char) or Key(Enter).  Any
+    // modifier-bearing key (Ctrl, Alt) or non-char key aborts the burst.
+    let mut buf = String::with_capacity(events.len());
+    for ev in events {
+        match ev {
+            Event::Key(k) if k.kind == KeyEventKind::Press => {
+                // Reject modifier combos (Ctrl+anything, Alt+anything).
+                if k.modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                {
+                    return None;
+                }
+                match k.code {
+                    KeyCode::Char(c) => buf.push(c),
+                    KeyCode::Enter => buf.push('\n'),
+                    // Any other key (Esc, arrows, backspace…) → not a paste burst.
+                    _ => return None,
+                }
+            }
+            // Non-key events (resize, focus, …) are fine to ignore; they don't
+            // disqualify the burst.
+            Event::Key(_) => return None, // Release/repeat events → abort
+            _ => {}
+        }
+    }
+    if buf.is_empty() {
+        None
+    } else {
+        Some(buf)
+    }
 }
 
 fn render(f: &mut Frame, app: &mut App) {
@@ -573,8 +656,16 @@ fn handle_theme_picker(app: &mut App, registry: &Registry, code: KeyCode) -> Res
 }
 
 fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()> {
+    // If keys are arriving faster than 10 ms apart we are almost certainly in
+    // the middle of a paste burst that the terminal chose not to wrap in
+    // bracketed-paste markers (or the burst slipped past collect_char_burst
+    // because it contained fewer than 3 events).  In that case, suppress any
+    // side-effecting single-character command so random letters in the pasted
+    // text don't quit the app, open the theme picker, or trigger agent spawns.
+    let is_burst = app.last_key_at.elapsed() < Duration::from_millis(10);
+
     match code {
-        KeyCode::Char('q') | KeyCode::Char('Q') => {
+        KeyCode::Char('q') | KeyCode::Char('Q') if !is_burst => {
             app.should_quit = true;
         }
         KeyCode::Up | KeyCode::Char('k') => {
@@ -602,7 +693,7 @@ fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()
             }
         }
         // ── Preview pane ──────────────────────────────────────────────────────
-        KeyCode::Char('w') => {
+        KeyCode::Char('w') if !is_burst => {
             app.show_preview = !app.show_preview;
             if app.show_preview {
                 app.preview_scroll = 0;
@@ -622,14 +713,15 @@ fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()
                 app.preview_scroll = app.preview_scroll.saturating_sub(5);
             }
         }
-        KeyCode::Char('t') => {
+        KeyCode::Char('t') if !is_burst => {
             app.open_theme_picker();
         }
-        KeyCode::Char('?') => {
+        KeyCode::Char('?') if !is_burst => {
             app.show_help = !app.show_help;
         }
-        KeyCode::Char('s') => {
+        KeyCode::Char('s') if !is_burst => {
             if app.selected_worktree().is_none() {
+                app.set_status("Select a worktree first (use j/k to navigate to a worktree row).");
                 return Ok(());
             }
             let phase = app.selected_phase().to_string();
@@ -643,24 +735,49 @@ fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()
             app.input_buf.clear();
             app.mode = Mode::Prompt(ActionKind::Spawn);
         }
-        KeyCode::Char('p') => {
+        KeyCode::Char('p') if !is_burst => {
             if app.selected_worktree().is_none() {
+                app.set_status("Select a worktree first (use j/k to navigate to a worktree row).");
                 return Ok(());
             }
             app.input_buf.clear();
             app.mode = Mode::Prompt(ActionKind::Plan);
         }
-        KeyCode::Char('x') => {
-            let phase = app.selected_phase().to_string();
-            if !App::is_active_phase(&phase) || app.selected_worktree().is_none() {
+        KeyCode::Char('x') if !is_burst => {
+            if app.selected_worktree().is_none() {
+                app.set_status("Select a worktree first (use j/k to navigate to a worktree row).");
                 return Ok(());
+            }
+            let phase = app.selected_phase().to_string();
+            if App::is_active_phase(&phase) {
+                app.set_status(format!(
+                    "Warning: {} is [{}] — QA will overwrite the running agent. Enter PR number and press Enter, Esc to cancel.",
+                    app.selected_worktree().map(|w| w.window_name.as_str()).unwrap_or("?"),
+                    phase
+                ));
             }
             app.input_buf.clear();
             app.mode = Mode::Prompt(ActionKind::Qa);
         }
-        KeyCode::Char('r') => {
+        KeyCode::Char('m') if !is_burst => {
             let phase = app.selected_phase().to_string();
-            if !App::is_active_phase(&phase) || app.selected_worktree().is_none() {
+            if app.selected_worktree().is_none() {
+                app.set_status("Select a worktree first (use j/k to navigate to a worktree row).");
+                return Ok(());
+            }
+            if !App::is_active_phase(&phase) {
+                return Ok(());
+            }
+            app.input_buf.clear();
+            app.mode = Mode::Prompt(ActionKind::Send);
+        }
+        KeyCode::Char('r') if !is_burst => {
+            let phase = app.selected_phase().to_string();
+            if app.selected_worktree().is_none() {
+                app.set_status("Select a worktree first (use j/k to navigate to a worktree row).");
+                return Ok(());
+            }
+            if !App::is_active_phase(&phase) {
                 return Ok(());
             }
             if let Some(wt) = app.selected_worktree() {
@@ -674,9 +791,13 @@ fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()
                 }
             }
         }
-        KeyCode::Char('a') => {
+        KeyCode::Char('a') if !is_burst => {
             let phase = app.selected_phase().to_string();
-            if !App::is_active_phase(&phase) || app.selected_worktree().is_none() {
+            if app.selected_worktree().is_none() {
+                app.set_status("Select a worktree first (use j/k to navigate to a worktree row).");
+                return Ok(());
+            }
+            if !App::is_active_phase(&phase) {
                 return Ok(());
             }
             if let Some(wt) = app.selected_worktree() {
@@ -685,7 +806,7 @@ fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()
                 attach_to_window(&app.session, &window_name, &full_name);
             }
         }
-        KeyCode::Char('v') => match crate::supervise::cmd_supervise(registry) {
+        KeyCode::Char('v') if !is_burst => match crate::supervise::cmd_supervise(registry) {
             Ok(()) => {
                 let _ = tmux::select_tui_window(&app.session, &app.tui_window_name);
                 app.set_status("Supervisor started in 'supervisor' window.".to_string());
@@ -720,10 +841,11 @@ fn handle_prompt(
 
         // ── Submit ────────────────────────────────────────────────────────────
         KeyCode::Enter => {
-            // If a paste event arrived within 50 ms we're almost certainly
+            // If a paste event arrived within 200 ms we're almost certainly
             // inside a bracketed-paste burst — treat the newline as literal
-            // text rather than a submit trigger.
-            if app.last_paste_at.elapsed() < Duration::from_millis(50) {
+            // text rather than a submit trigger.  200 ms is intentionally
+            // generous to accommodate slow/batched terminals.
+            if app.last_paste_at.elapsed() < Duration::from_millis(200) {
                 app.input_buf.insert(app.cursor_pos, '\n');
                 app.cursor_pos += 1;
             } else {
@@ -930,6 +1052,7 @@ fn execute_action(
         ActionKind::Spawn => execute_spawn(app, registry, force),
         ActionKind::Plan => execute_plan(app, registry),
         ActionKind::Qa => execute_qa(app, registry),
+        ActionKind::Send => execute_send(app, registry),
     }
 }
 
@@ -939,7 +1062,7 @@ fn execute_spawn(app: &mut App, registry: &Registry, force: bool) -> Result<()> 
         None => return Ok(()),
     };
     match crate::cmd_spawn(registry, &wt_name, &prompt, force) {
-        Ok(()) => {
+        Ok(_) => {
             let _ = tmux::select_tui_window(&app.session, &app.tui_window_name);
             app.set_status(format!("Spawned {}:dev", wt_name));
             push_history(app, &prompt);
@@ -974,7 +1097,7 @@ fn execute_plan(app: &mut App, registry: &Registry) -> Result<()> {
         None => return Ok(()),
     };
     match crate::plan::cmd_plan(registry, &wt_name, &prompt) {
-        Ok(()) => {
+        Ok(_) => {
             let _ = tmux::select_tui_window(&app.session, &app.tui_window_name);
             app.set_status(format!("Plan agent started in {}:plan", wt_name));
             push_history(app, &prompt);
@@ -1007,7 +1130,7 @@ fn execute_qa(app: &mut App, registry: &Registry) -> Result<()> {
         }
     };
     match crate::qa::cmd_qa(registry, &wt_name, Some(pr_number)) {
-        Ok(()) => {
+        Ok(_) => {
             let _ = tmux::select_tui_window(&app.session, &app.tui_window_name);
             app.set_status(format!(
                 "QA agent started for {} PR #{}",
@@ -1023,6 +1146,37 @@ fn execute_qa(app: &mut App, registry: &Registry) -> Result<()> {
         }
         Err(e) => {
             app.set_status(format!("QA failed: {}", e));
+            app.mode = Mode::Normal;
+            app.input_buf.clear();
+            app.cursor_pos = 0;
+        }
+    }
+    Ok(())
+}
+
+fn execute_send(app: &mut App, registry: &Registry) -> Result<()> {
+    let wt_name = match app.selected_worktree() {
+        Some(wt) => wt.window_name.clone(),
+        None => return Ok(()),
+    };
+    let prompt = app.input_buf.trim().to_string();
+    if prompt.is_empty() {
+        app.set_status("Message is empty — type something first.");
+        return Ok(());
+    }
+    match crate::cmd_send(registry, &wt_name, &prompt) {
+        Ok(()) => {
+            let _ = tmux::select_tui_window(&app.session, &app.tui_window_name);
+            app.set_status(format!("Sent message to {}.", wt_name));
+            push_history(app, &prompt);
+            app.mode = Mode::Normal;
+            app.input_buf.clear();
+            app.cursor_pos = 0;
+            app.history_idx = None;
+            app.refresh_phases();
+        }
+        Err(e) => {
+            app.set_status(format!("Send failed: {}", e));
             app.mode = Mode::Normal;
             app.input_buf.clear();
             app.cursor_pos = 0;

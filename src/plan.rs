@@ -128,7 +128,7 @@ pub fn build_plan_prompt(task: &str, session: &str, window_base: &str) -> String
 /// Note: spawn_window is NOT called when a window already exists, to avoid the
 /// double-send bug where spawn_window injects the prompt into the live process
 /// and replace_window_process injects it again after C-c.
-pub fn cmd_plan(registry: &Registry, worktree_name: &str, task: &str) -> Result<()> {
+pub fn cmd_plan(registry: &Registry, worktree_name: &str, task: &str) -> Result<String> {
     let worktree = registry.require_worktree(worktree_name)?;
 
     let session = tmux::current_session()?;
@@ -144,25 +144,25 @@ pub fn cmd_plan(registry: &Registry, worktree_name: &str, task: &str) -> Result<
 
     let window_exists = tmux::find_window_index(&session, &base_name).is_some();
 
-    if window_exists {
+    let msg = if window_exists {
         // Rename first so the window reflects :plan before we kill+replace.
         tmux::set_window_phase(&session, &base_name, Some("plan"))?;
         // replace_window_process sends the prompt exactly once (after C-c).
         tmux::replace_window_process(&session, &base_name, &abs_path_str, &prompt, Some("plan"))?;
-        println!(
+        format!(
             "Planning agent started in existing window '{}:plan'.",
             base_name
-        );
+        )
     } else {
         // spawn_window creates the window (named :dev) and sends the opencode
         // command exactly once.
         tmux::spawn_window(&session, &base_name, &abs_path_str, &prompt, Some("plan"))?;
         // Immediately rename :dev -> :plan.
         tmux::set_window_phase(&session, &base_name, Some("plan"))?;
-        println!("Planning agent started in new window '{}:plan'.", base_name);
-    }
+        format!("Planning agent started in new window '{}:plan'.", base_name)
+    };
 
-    Ok(())
+    Ok(msg)
 }
 
 #[cfg(test)]

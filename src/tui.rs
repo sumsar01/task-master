@@ -531,8 +531,8 @@ fn run_loop<B: ratatui::backend::Backend>(
             for ev in events {
                 match ev {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        app.last_key_at = Instant::now();
                         handle_key(app, registry, key.code, key.modifiers)?;
+                        app.last_key_at = Instant::now();
                     }
                     Event::Paste(text) => {
                         if matches!(app.mode, Mode::Prompt(_) | Mode::ForceConfirm) {

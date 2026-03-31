@@ -22,13 +22,7 @@ pub fn build_qa_prompt(
     // tmux rename-window (by index) to update its phase suffix on handoff/escalation.
     // We tell the agent to run `tmux list-windows` to find the window index,
     // then rename it — this avoids colon-in-target ambiguity.
-    let rename_cmd = format!(
-        "tmux list-windows -t {session} -F '#{{window_index}} #{{window_name}}' \
-         | awk -F'[ :]' '$2==\"{base}\" {{print $1}}' \
-         | xargs -I{{}} tmux rename-window -t {session}:{{}}",
-        session = session,
-        base = dev_window,
-    );
+    let rename_cmd = tmux::build_rename_cmd(session, dev_window);
 
     let handoff_rename = format!("{} '{base}:review'", rename_cmd, base = dev_window);
     let escalation_rename = format!("{} '{base}:blocked'", rename_cmd, base = dev_window);

@@ -16,13 +16,7 @@ use tracing::info;
 /// as the QA agent.
 pub fn build_plan_prompt(task: &str, session: &str, window_base: &str) -> String {
     // Awk-based rename command that avoids colon-in-target tmux ambiguity.
-    let rename_cmd = format!(
-        "tmux list-windows -t {session} -F '#{{window_index}} #{{window_name}}' \
-         | awk -F'[ :]' '$2==\"{base}\" {{print $1}}' \
-         | xargs -I{{}} tmux rename-window -t {session}:{{}}",
-        session = session,
-        base = window_base,
-    );
+    let rename_cmd = tmux::build_rename_cmd(session, window_base);
     let ready_rename = format!("{} '{base}:ready'", rename_cmd, base = window_base);
 
     format!(

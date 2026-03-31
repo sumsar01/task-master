@@ -394,6 +394,25 @@ pub fn capture_pane(session: &str, base_name: &str) -> Option<Vec<String>> {
     Some(lines)
 }
 
+/// Build the awk-based tmux rename-window command used by QA, plan, and e2e
+/// agents to update the window's phase suffix.
+///
+/// The resulting shell fragment, when executed, finds the window whose base
+/// name matches `base` and renames it to the caller-supplied suffix — e.g.:
+///
+/// ```text
+/// format!("{} 'WIS-olive:review'", build_rename_cmd(session, "WIS-olive"))
+/// ```
+pub fn build_rename_cmd(session: &str, base: &str) -> String {
+    format!(
+        "tmux list-windows -t {session} -F '#{{window_index}} #{{window_name}}' \
+         | awk -F'[ :]' '$2==\"{base}\" {{print $1}}' \
+         | xargs -I{{}} tmux rename-window -t {session}:{{}}",
+        session = session,
+        base = base,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -17,3 +17,6 @@ task-master.toml
 # Serena LSP tooling
 .serena/
 
+# Beads credential key (local secret)
+.beads/.beads-credential-key
+

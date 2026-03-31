@@ -15,13 +15,7 @@ pub fn build_e2e_prompt(
     session: &str,
     base_name: &str, // e.g. "WIS-olive"
 ) -> String {
-    let rename_cmd = format!(
-        "tmux list-windows -t {session} -F '#{{window_index}} #{{window_name}}' \
-         | awk -F'[ :]' '$2==\"{base}\" {{print $1}}' \
-         | xargs -I{{}} tmux rename-window -t {session}:{{}}",
-        session = session,
-        base = base_name,
-    );
+    let rename_cmd = tmux::build_rename_cmd(session, base_name);
 
     let done_rename = format!("{} '{base}:e2e-done'", rename_cmd, base = base_name);
     let blocked_rename = format!("{} '{base}:e2e-blocked'", rename_cmd, base = base_name);

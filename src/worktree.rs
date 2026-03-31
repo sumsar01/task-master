@@ -1,288 +1,21 @@
-mod e2e;
-mod hooks;
-mod notify;
-mod plan;
-mod qa;
-mod registry;
-mod stats;
-mod status;
-mod supervise;
-mod tmux;
-mod tui;
-mod ui;
-mod worktree;
-
+use crate::hooks;
+use crate::registry::{self, Registry};
+use crate::tmux;
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
-use registry::Registry;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
 use toml_edit::{value, DocumentMut, Item, Table};
 use tracing::info;
 
-#[derive(Parser)]
-#[command(name = "task-master", about = "AI agent orchestrator")]
-struct Cli {
-    /// Override the base directory (defaults to current directory or $TASK_MASTER_DIR)
-    #[arg(long, env = "TASK_MASTER_DIR")]
-    dir: Option<PathBuf>,
-
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[derive(Subcommand)]
-enum Commands {
-    /// Spawn an opencode agent in a new tmux window for the given worktree
-    Spawn {
-        /// Worktree window name, e.g. WIS-olive
-        worktree: String,
-        /// Prompt / task description to pass to the agent
-        prompt: String,
-        /// Reset the worktree even if it has uncommitted changes (discards all local modifications)
-        #[arg(long, default_value_t = false)]
-        force: bool,
-    },
-    /// Spawn a planning agent to decompose a task into beads issues
-    Plan {
-        /// Worktree window name, e.g. WIS-olive
-        worktree: String,
-        /// Task description to plan
-        prompt: String,
-    },
-    /// List all configured projects and worktrees
-    List,
-    /// Add a new worktree to an existing project
-    AddWorktree {
-        /// Project short name, e.g. WIS
-        project: String,
-        /// Worktree name, e.g. cedar
-        name: String,
-        /// Branch to check out (defaults to HEAD)
-        #[arg(long)]
-        branch: Option<String>,
-    },
-    /// Add a new project by cloning a bare repo
-    AddProject {
-        /// Full project name, e.g. warehouse-integration-service
-        name: String,
-        /// Short name used as window prefix, e.g. WIS
-        short: String,
-        /// Git repo URL to clone
-        url: String,
-    },
-    /// Spawn a QA agent for a worktree's open PR
-    Qa {
-        /// Worktree window name, e.g. WIS-olive
-        worktree: String,
-        /// GitHub PR number to review (auto-detected from current branch if omitted)
-        pr_number: Option<u64>,
-    },
-    /// Notify the supervisor that a PR is ready for QA (safe to call from inside an agent)
-    Notify {
-        /// Worktree window name, e.g. WIS-olive
-        worktree: String,
-        /// GitHub PR number that is ready for QA
-        pr_number: u64,
-    },
-    /// Send a prompt directly to the running opencode session in a worktree window
-    Send {
-        /// Worktree window name, e.g. WIS-olive
-        worktree: String,
-        /// Prompt text to send to the running opencode TUI
-        prompt: String,
-    },
-    /// Spawn an e2e validation agent for a worktree's deployed PR
-    E2e {
-        /// Worktree window name, e.g. WIS-olive
-        worktree: String,
-        /// GitHub PR number to validate against staging
-        pr_number: u64,
-    },
-    /// Install QA post-push git hooks into all registered worktrees
-    InstallQaHooks,
-    /// Reset a worktree window's phase indicator back to idle
-    Reset {
-        /// Worktree window name, e.g. WIS-olive (with or without phase suffix)
-        worktree: String,
-    },
-    /// Start the supervisor agent that monitors all worktree windows
-    Supervise,
-    /// Show status of all registered worktrees with their live tmux phase
-    Status,
-    /// Show token usage and cost statistics for all registered worktrees
-    Stats {
-        /// Show stats for the last N days (default: all time)
-        #[arg(long)]
-        days: Option<u32>,
-    },
-    /// Remove a worktree from the registry and from git
-    RemoveWorktree {
-        /// Worktree window name, e.g. WIS-olive
-        worktree: String,
-        /// Force removal even if a tmux window is active
-        #[arg(long)]
-        force: bool,
-    },
-    /// Open the interactive TUI dashboard
-    Tui,
-}
-
-fn main() -> Result<()> {
-    let cli = Cli::parse();
-
-    // When running the TUI, redirect tracing output to /tmp/task-master.log so
-    // log lines don't corrupt the ratatui alternate-screen buffer.
-    let is_tui = matches!(cli.command, Commands::Tui);
-    if is_tui {
-        let log_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/task-master.log")
-            .context("Failed to open /tmp/task-master.log")?;
-        let log_file = Arc::new(Mutex::new(log_file));
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-            )
-            .with_writer(move || {
-                // Return a clone of the Arc-wrapped file each time a writer is needed.
-                log_file
-                    .lock()
-                    .expect("log file lock poisoned")
-                    .try_clone()
-                    .expect("failed to clone log file handle")
-            })
-            .with_ansi(false)
-            .init();
-    } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-            )
-            .init();
-    }
-
-    let base_dir = cli
-        .dir
-        .unwrap_or_else(|| PathBuf::from("."))
-        .canonicalize()
-        .context("Failed to resolve base directory")?;
-
-    match cli.command {
-        // add-project doesn't need an existing registry
-        Commands::AddProject { name, short, url } => {
-            cmd_add_project(&base_dir, &name, &short, &url)
-        }
-        _ => {
-            let registry = Registry::load(base_dir.clone()).context("Failed to load registry")?;
-            match cli.command {
-                Commands::Spawn {
-                    worktree,
-                    prompt,
-                    force,
-                } => cmd_spawn(&registry, &worktree, &prompt, force).map(|msg| println!("{}", msg)),
-                Commands::Plan { worktree, prompt } => {
-                    plan::cmd_plan(&registry, &worktree, &prompt).map(|msg| println!("{}", msg))
-                }
-                Commands::List => cmd_list(&registry),
-                Commands::AddWorktree {
-                    project,
-                    name,
-                    branch,
-                } => worktree::cmd_add_worktree(
-                    &registry,
-                    &base_dir,
-                    &project,
-                    &name,
-                    branch.as_deref(),
-                ),
-                Commands::Qa {
-                    worktree,
-                    pr_number,
-                } => qa::cmd_qa(&registry, &worktree, pr_number).map(|msg| println!("{}", msg)),
-                Commands::Notify {
-                    worktree,
-                    pr_number,
-                } => notify::cmd_notify(&registry, &worktree, pr_number),
-                Commands::Send { worktree, prompt } => cmd_send(&registry, &worktree, &prompt),
-                Commands::E2e {
-                    worktree,
-                    pr_number,
-                } => e2e::cmd_e2e(&registry, &worktree, pr_number),
-                Commands::InstallQaHooks => hooks::cmd_install_qa_hooks(&registry),
-                Commands::Reset { worktree } => cmd_reset(&worktree),
-                Commands::Supervise => supervise::cmd_supervise(&registry),
-                Commands::Status => status::cmd_status(&registry),
-                Commands::Stats { days } => stats::cmd_stats(&registry, days),
-                Commands::RemoveWorktree { worktree, force } => {
-                    cmd_remove_worktree(&registry, &base_dir, &worktree, force)
-                }
-                Commands::Tui => tui::cmd_tui(&registry),
-                Commands::AddProject { .. } => unreachable!(),
-            }
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
-// spawn
+// reset_worktree_to_master
 // ---------------------------------------------------------------------------
 
-fn build_spawn_prompt(window_name: &str, user_prompt: &str) -> String {
-    let base_name = tmux::base_window_name(window_name);
-    format!(
-        "{user_prompt}
-
-## Starting point
-
-Your worktree has been reset to master. Create a new branch before making any changes:
-  git checkout -b feat/<short-description>
-
-## PR workflow (MANDATORY)
-
-When you are ready to open a PR, you MUST follow these steps in order:
-
-1. Push the branch explicitly:
-   git push origin HEAD
-
-2. Open the PR with --no-push and --label wip:
-   gh pr create --no-push --label wip --title \"<title>\" --body \"<body>\"
-
-3. Read the PR number from the URL printed by gh pr create, then notify the supervisor:
-   task-master notify {base_name} <pr-number>
-
-NEVER use `gh pr create` without `--no-push` — it pushes via the GitHub API and
-bypasses the git post-push hook, so QA will never start automatically.
-NEVER call `task-master qa` directly — it replaces the running process and will kill
-your session before the command can return. Always use `task-master notify` instead.",
-        user_prompt = user_prompt,
-        base_name = base_name,
-    )
-}
-
-/// Reset a worktree to a clean state at the tip of the default branch (master or main)
-/// before spawning an agent.
+/// Reset a git worktree to the tip of `master` (or `main`) at origin.
 ///
-/// Works with both regular clones and bare-repo git worktrees.  In bare-repo setups
-/// the same branch cannot be checked out in two worktrees simultaneously, so we avoid
-/// `git checkout <branch>` in favour of `git reset --hard origin/<branch>` which resets
-/// the working tree to master's content without needing to switch branches.
-///
-/// 1. Checks for uncommitted changes via `git status --porcelain`.
-///    - If dirty and `force` is false: returns an error.
-///    - If dirty and `force` is true: hard-resets and cleans the worktree.
-/// 2. Fetches from origin (non-fatal — repo may be local-only with no remote).
-/// 3. Tries `git checkout master` (or `main`) first (works in plain clones and when
-///    the worktree is already on that branch).  If checkout fails because the branch
-///    is locked in another worktree (bare repo setup), falls back to
-///    `git reset --hard origin/master` (or `origin/main`) so the content matches
-///    master without requiring a branch switch.
-/// 4. Cleans untracked files so the agent starts on a pristine state.
-fn reset_worktree_to_master(path: &Path, force: bool) -> Result<()> {
+/// If `force` is `false` and the worktree has uncommitted changes, the
+/// function returns an error.  Pass `force = true` to discard them.
+pub fn reset_worktree_to_master(path: &Path, force: bool) -> Result<()> {
     let git = |args: &[&str]| -> Result<String> {
         let out = Command::new("git")
             .arg("-C")
@@ -371,76 +104,11 @@ fn reset_worktree_to_master(path: &Path, force: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn cmd_spawn(
-    registry: &Registry,
-    window_name: &str,
-    prompt: &str,
-    force: bool,
-) -> Result<String> {
-    let worktree = registry.require_worktree(window_name)?;
-
-    reset_worktree_to_master(&worktree.abs_path, force)?;
-
-    let session = tmux::current_session()?;
-    let abs_path_str = worktree.abs_path.to_string_lossy().to_string();
-    let prompt_owned = build_spawn_prompt(window_name, prompt);
-    let prompt = prompt_owned.as_str();
-
-    info!(
-        "[{}] Spawning in session '{}', dir {}",
-        window_name, session, abs_path_str
-    );
-
-    let base_name = tmux::base_window_name(window_name);
-
-    let is_new = if tmux::find_window_index(&session, base_name).is_none() {
-        // No window yet — create it fresh.
-        tmux::spawn_window(&session, window_name, &abs_path_str, prompt, None)?;
-        true
-    } else {
-        // Window already exists (possibly in :plan, :qa, :review, or :dev phase).
-        // Always replace the running process with a fresh opencode dev session so
-        // we don't accidentally send prompts into a plan/qa agent's chat input.
-        tmux::set_window_phase(&session, base_name, Some("dev"))?;
-        tmux::replace_window_process(&session, base_name, &abs_path_str, prompt, None)?;
-        false
-    };
-
-    // Ensure :dev phase on new windows too (spawn_window sets it but be explicit).
-    tmux::set_window_phase(&session, base_name, Some("dev"))?;
-
-    let msg = if is_new {
-        format!("Spawned '{}:dev' in a new window.", base_name)
-    } else {
-        format!(
-            "Replaced existing '{}' window with fresh dev session (now '{}:dev').",
-            base_name, base_name
-        )
-    };
-    Ok(msg)
-}
-
-// ---------------------------------------------------------------------------
-// list
-// ---------------------------------------------------------------------------
-
-fn cmd_list(registry: &Registry) -> Result<()> {
-    for project in &registry.projects {
-        println!("{} ({})", project.name, project.short);
-        for wt in &project.worktrees {
-            let window_name = format!("{}-{}", project.short, wt.name);
-            let abs = registry.base_dir.join(&project.repo).join(&wt.name);
-            println!("  {:<20} {}", window_name, abs.display());
-        }
-    }
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // add-worktree
 // ---------------------------------------------------------------------------
 
-fn cmd_add_worktree(
+pub fn cmd_add_worktree(
     registry: &Registry,
     base_dir: &PathBuf,
     project_short: &str,
@@ -524,95 +192,10 @@ fn cmd_add_worktree(
 }
 
 // ---------------------------------------------------------------------------
-// add-project
-// ---------------------------------------------------------------------------
-
-fn cmd_add_project(base_dir: &PathBuf, name: &str, short: &str, url: &str) -> Result<()> {
-    // Check short name not already taken
-    let config_path = base_dir.join("task-master.toml");
-    if config_path.exists() {
-        let contents = std::fs::read_to_string(&config_path)?;
-        if let Ok(existing) = Registry::load(base_dir.clone()) {
-            if existing.find_project(short).is_some() {
-                bail!("Project short name '{}' is already in use.", short);
-            }
-        }
-        let _ = contents; // suppress unused warning
-    }
-
-    let projects_dir = base_dir.join("projects");
-    std::fs::create_dir_all(&projects_dir).context("Failed to create projects/ directory")?;
-
-    let repo_path = projects_dir.join(name);
-    if repo_path.exists() {
-        bail!("Directory already exists: {}", repo_path.display());
-    }
-
-    info!("Cloning bare repo {} -> {}", url, repo_path.display());
-    let status = Command::new("git")
-        .args(["clone", "--bare", url])
-        .arg(&repo_path)
-        .status()
-        .context("Failed to run git clone")?;
-
-    if !status.success() {
-        bail!("git clone failed");
-    }
-
-    // Append [[projects]] block to task-master.toml
-    let repo_rel = format!("projects/{}", name);
-
-    let new_block = format!(
-        "\n[[projects]]\nname = \"{}\"\nshort = \"{}\"\nrepo = \"{}\"\n",
-        name, short, repo_rel
-    );
-
-    let mut contents = if config_path.exists() {
-        std::fs::read_to_string(&config_path)?
-    } else {
-        String::new()
-    };
-    contents.push_str(&new_block);
-    std::fs::write(&config_path, &contents)?;
-
-    println!(
-        "Added project {} ({}). Add a worktree with:\n  task-master add-worktree {} olive",
-        name, short, short
-    );
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// reset
-// ---------------------------------------------------------------------------
-
-pub fn cmd_reset(worktree: &str) -> Result<()> {
-    let session = tmux::current_session()?;
-    let base = tmux::base_window_name(worktree);
-    tmux::set_window_phase(&session, base, None)?;
-    println!("Reset '{}' to idle.", base);
-    Ok(())
-}
-
-/// Send a prompt directly to the running opencode session in a worktree window.
-///
-/// Unlike `cmd_spawn`, this does **not** reset the branch, does not kill the
-/// existing session, and does not append any PR-workflow boilerplate. It is the
-/// equivalent of the user typing the prompt into the opencode TUI by hand.
-pub fn cmd_send(registry: &Registry, worktree_name: &str, prompt: &str) -> Result<()> {
-    let wt = registry.require_worktree(worktree_name)?;
-    let session = tmux::current_session()?;
-    tmux::send_to_window(&session, &wt.window_name, prompt)?;
-    println!("Sent to '{}': {}", wt.window_name, prompt);
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // remove-worktree
 // ---------------------------------------------------------------------------
 
-fn cmd_remove_worktree(
+pub fn cmd_remove_worktree(
     registry: &Registry,
     base_dir: &PathBuf,
     window_name: &str,
@@ -689,7 +272,7 @@ fn cmd_remove_worktree(
 /// Finds the `[[projects]]` block whose `short` key matches `project_short`
 /// (case-insensitive) and pushes a new worktree entry with the given name.
 /// Returns the updated TOML as a `String`.
-fn append_worktree_to_toml(
+pub fn append_worktree_to_toml(
     toml_str: &str,
     project_short: &str,
     worktree_name: &str,
@@ -725,6 +308,10 @@ fn append_worktree_to_toml(
     Ok(doc.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -759,7 +346,8 @@ name = "olive"
     fn test_append_worktree_is_valid_toml() {
         let result = append_worktree_to_toml(BASE_TOML, "WIS", "cedar").unwrap();
         // Round-trip: must parse without error and contain both worktrees.
-        let reg = registry::Registry::load_from_str(&result, PathBuf::from("/base")).unwrap();
+        let reg =
+            registry::Registry::load_from_str(&result, std::path::PathBuf::from("/base")).unwrap();
         let names: Vec<&str> = reg
             .worktrees
             .iter()
@@ -792,7 +380,8 @@ repo = "projects/fresh-service"
         let result = append_worktree_to_toml(toml, "FS", "main").unwrap();
         assert!(result.contains("main"));
         // Validate it is parseable.
-        let reg = registry::Registry::load_from_str(&result, PathBuf::from("/base")).unwrap();
+        let reg =
+            registry::Registry::load_from_str(&result, std::path::PathBuf::from("/base")).unwrap();
         assert_eq!(reg.worktrees.len(), 1);
         assert_eq!(reg.worktrees[0].window_name, "FS-main");
     }
@@ -813,7 +402,8 @@ short = "B"
 repo = "projects/beta"
 "#;
         let result = append_worktree_to_toml(toml, "B", "new-branch").unwrap();
-        let reg = registry::Registry::load_from_str(&result, PathBuf::from("/base")).unwrap();
+        let reg =
+            registry::Registry::load_from_str(&result, std::path::PathBuf::from("/base")).unwrap();
         let names: Vec<&str> = reg
             .worktrees
             .iter()
@@ -836,43 +426,6 @@ repo = "projects/beta"
         let toml = "# top comment\n".to_string() + BASE_TOML;
         let result = append_worktree_to_toml(&toml, "WIS", "branch").unwrap();
         assert!(result.starts_with("# top comment\n"), "comment was lost");
-    }
-
-    // -------------------------------------------------------------------------
-    // Registry::load from a real file (tempdir)
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_registry_load_from_file() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let config_path = dir.path().join("task-master.toml");
-        std::fs::write(&config_path, BASE_TOML).unwrap();
-
-        let reg = Registry::load(dir.path().to_path_buf()).unwrap();
-        assert_eq!(reg.projects.len(), 1);
-        assert_eq!(reg.worktrees.len(), 1);
-        assert_eq!(reg.worktrees[0].window_name, "WIS-olive");
-        assert_eq!(
-            reg.worktrees[0].abs_path,
-            dir.path()
-                .join("projects/warehouse-integration-service/olive")
-        );
-    }
-
-    #[test]
-    fn test_registry_load_missing_file_returns_error() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        // No task-master.toml written.
-        let err = Registry::load(dir.path().to_path_buf()).unwrap_err();
-        assert!(err.to_string().contains("Failed to read config"));
-    }
-
-    #[test]
-    fn test_registry_load_invalid_toml_returns_error() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("task-master.toml"), "not valid toml }{").unwrap();
-        let err = Registry::load(dir.path().to_path_buf()).unwrap_err();
-        assert!(err.to_string().contains("parse") || err.to_string().contains("TOML"));
     }
 
     // -------------------------------------------------------------------------
@@ -1044,28 +597,5 @@ repo = "projects/beta"
             "no-remote pull failure should warn+continue: {:?}",
             result
         );
-    }
-
-    #[test]
-    fn test_registry_load_duplicate_window_names_returns_error() {
-        let toml = r#"
-[[projects]]
-name = "svc"
-short = "S"
-repo = "projects/svc"
-[[projects.worktrees]]
-name = "dup"
-
-[[projects]]
-name = "other"
-short = "S"
-repo = "projects/other"
-[[projects.worktrees]]
-name = "dup"
-"#;
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("task-master.toml"), toml).unwrap();
-        let err = Registry::load(dir.path().to_path_buf()).unwrap_err();
-        assert!(err.to_string().contains("Duplicate"));
     }
 }

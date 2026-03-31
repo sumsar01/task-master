@@ -1,3 +1,4 @@
+pub mod confirm_close;
 pub mod help;
 pub mod main_screen;
 pub mod prompt;
@@ -34,5 +35,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
         crate::tui::Mode::Prompt(_) | crate::tui::Mode::ForceConfirm
     ) {
         prompt::render(f, app, &t);
+    }
+
+    // Confirm-close modal — shown on top of everything when closing a window.
+    if app.mode == crate::tui::Mode::ConfirmClose {
+        confirm_close::render(f, app, &t);
     }
 }

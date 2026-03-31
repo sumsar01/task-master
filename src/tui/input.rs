@@ -1,3 +1,4 @@
+use super::actions::execute_close;
 use super::app::{ActionKind, App, ListEntry, Mode};
 use crate::registry::Registry;
 use anyhow::Result;
@@ -80,6 +81,7 @@ pub fn handle_key(
         Mode::Normal => handle_normal(app, registry, code),
         Mode::Prompt(kind) => handle_prompt(app, registry, code, modifiers, kind.clone()),
         Mode::ForceConfirm => handle_force_confirm(app, registry, code),
+        Mode::ConfirmClose => handle_confirm_close(app, code),
     }
 }
 
@@ -255,6 +257,12 @@ fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()
             }
             Err(e) => app.set_status(format!("Supervise failed: {}", e)),
         },
+        KeyCode::Char('c') if !is_burst => {
+            if !app.require_worktree_selected() {
+                return Ok(());
+            }
+            app.mode = Mode::ConfirmClose;
+        }
         _ => {}
     }
     Ok(())
@@ -409,6 +417,20 @@ pub fn handle_force_confirm(app: &mut App, registry: &Registry, code: KeyCode) -
             super::actions::execute_spawn(app, registry, true)?;
         }
         _ => {}
+    }
+    Ok(())
+}
+
+fn handle_confirm_close(app: &mut App, code: KeyCode) -> Result<()> {
+    match code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            execute_close(app)?;
+        }
+        _ => {
+            // Any other key cancels.
+            app.mode = Mode::Normal;
+            app.status_msg = None;
+        }
     }
     Ok(())
 }

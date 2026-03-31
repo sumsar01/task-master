@@ -69,6 +69,7 @@ fn render_header(f: &mut Frame, area: Rect, t: &Theme) {
         ("p", "plan"),
         ("x", "qa"),
         ("r", "reset"),
+        ("c", "close"),
         ("a", "attach"),
         ("v", "supervise"),
         ("w", "preview"),
@@ -96,7 +97,7 @@ fn render_header(f: &mut Frame, area: Rect, t: &Theme) {
 /// Number of lines the Actions panel body occupies (excluding its border).
 /// Keep in sync with `render_actions` content. Border adds 2, so the block
 /// height passed to `Constraint::Length` is ACTIONS_LINES + 2.
-const ACTIONS_LINES: u16 = 18;
+const ACTIONS_LINES: u16 = 19;
 
 fn render_content(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) {
     let (left_pct, right_pct) = if area.width >= SPLIT_THRESHOLD {
@@ -220,6 +221,7 @@ fn render_actions(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
     lines.push(Line::from(""));
     lines.push(action_line('r', "reset window", has_wt, !active, t));
     lines.push(action_line('a', "attach", has_wt, !active, t));
+    lines.push(action_line('c', "close window", has_wt, false, t));
     lines.push(Line::from(""));
     lines.push(action_line('v', "supervise", true, false, t));
     lines.push(Line::from(""));
@@ -397,6 +399,7 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
             " Press Enter to force-spawn (discards uncommitted changes), Esc to cancel".to_string(),
             t.text_style().fg(t.phase_error),
         ),
+        Mode::ConfirmClose => (String::new(), t.text_dim_style()),
         Mode::Normal => {
             if let Some(msg) = app.current_status() {
                 (format!(" {}", msg), t.text_dim_style())

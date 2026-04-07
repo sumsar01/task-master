@@ -51,6 +51,8 @@ pub enum ActionKind {
     Plan,
     Qa,
     Send,
+    /// Add a new git worktree: prompt expects "<project-short> <name> [branch]"
+    AddWorktree,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -123,6 +125,14 @@ pub struct App {
     /// Worktree index whose preview is currently cached.
     pub last_preview_idx: Option<usize>,
 
+    // ── Worktree detail pane ──────────────────────────────────────────────────
+    /// Whether the git-detail pane is currently shown.
+    pub show_detail: bool,
+    /// Rendered lines for the detail pane (branch, dirty count, recent commits).
+    pub detail_lines: Vec<String>,
+    /// Worktree index whose detail is currently cached.
+    pub last_detail_idx: Option<usize>,
+
     // ── Overlays ──────────────────────────────────────────────────────────────
     pub show_theme_picker: bool,
     pub show_help: bool,
@@ -186,6 +196,9 @@ impl App {
             preview_lines: Vec::new(),
             preview_scroll: 0,
             last_preview_idx: None,
+            show_detail: false,
+            detail_lines: Vec::new(),
+            last_detail_idx: None,
             show_theme_picker: false,
             show_help: false,
             theme_picker_cursor,
@@ -496,6 +509,9 @@ impl App {
         if self.show_preview {
             self.refresh_preview();
         }
+        if self.show_detail {
+            self.refresh_detail();
+        }
     }
 
     /// Re-capture the selected worktree's tmux pane content.
@@ -523,6 +539,57 @@ impl App {
         if self.preview_scroll > max_scroll {
             self.preview_scroll = 0;
         }
+    }
+
+    /// Populate `detail_lines` for the currently selected worktree by running
+    /// git subcommands in the worktree directory.  Called when the detail pane
+    /// is toggled on or when the selection changes while the pane is visible.
+    ///
+    /// Gathers:
+    ///   - Current branch name (`git rev-parse --abbrev-ref HEAD`)
+    ///   - Count of uncommitted changes (`git status --porcelain`)
+    ///   - Last 5 commit subjects (`git log --oneline -5`)
+    pub fn refresh_detail(&mut self) {
+        let wt = match self.selected_worktree() {
+            Some(w) => w.clone(),
+            None => {
+                self.detail_lines.clear();
+                return;
+            }
+        };
+        let wt_idx = self.selected_worktree_idx().unwrap();
+        let path = wt.abs_path.to_string_lossy().to_string();
+        let mut lines: Vec<String> = Vec::new();
+
+        // Branch
+        let branch = run_git(&path, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .unwrap_or_else(|| "unknown".to_string());
+        lines.push(format!("Branch: {}", branch.trim()));
+
+        // Dirty file count
+        let dirty = run_git(&path, &["status", "--porcelain"]).unwrap_or_default();
+        let dirty_count = dirty.lines().filter(|l| !l.is_empty()).count();
+        if dirty_count == 0 {
+            lines.push("Status: clean".to_string());
+        } else {
+            lines.push(format!("Status: {} uncommitted file(s)", dirty_count));
+        }
+
+        lines.push(String::new()); // blank separator
+        lines.push("Recent commits:".to_string());
+
+        // Last 5 commits
+        let log = run_git(&path, &["log", "--oneline", "-5"]).unwrap_or_default();
+        if log.trim().is_empty() {
+            lines.push("  (no commits)".to_string());
+        } else {
+            for commit_line in log.lines() {
+                lines.push(format!("  {}", commit_line));
+            }
+        }
+
+        self.detail_lines = lines;
+        self.last_detail_idx = Some(wt_idx);
     }
 
     pub fn load_stats_for_selected(&mut self) {
@@ -623,5 +690,30 @@ impl App {
         } else {
             true
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Run a git command in `working_dir` and return its trimmed stdout, or `None`
+/// if the command fails or produces no output.
+fn run_git(working_dir: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(working_dir)
+        .args(args)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    } else {
+        None
     }
 }

@@ -124,6 +124,9 @@ fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()
                 app.preview_scroll = 0;
                 app.refresh_preview();
             }
+            if app.show_detail {
+                app.refresh_detail();
+            }
         }
         KeyCode::Down | KeyCode::Char('j') => {
             app.move_down();
@@ -131,6 +134,9 @@ fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()
             if app.show_preview {
                 app.preview_scroll = 0;
                 app.refresh_preview();
+            }
+            if app.show_detail {
+                app.refresh_detail();
             }
         }
         // ── Collapse / expand project section or super-group ──────────────────
@@ -153,6 +159,16 @@ fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()
             if app.show_preview {
                 app.preview_scroll = 0;
                 app.refresh_preview();
+            }
+        }
+        // ── Detail pane ───────────────────────────────────────────────────────
+        KeyCode::Char('d') if !is_burst => {
+            if !app.require_worktree_selected() {
+                return Ok(());
+            }
+            app.show_detail = !app.show_detail;
+            if app.show_detail {
+                app.refresh_detail();
             }
         }
         // Scroll preview up (further into history) — only when preview visible.
@@ -268,6 +284,11 @@ fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()
                 return Ok(());
             }
             app.mode = Mode::ConfirmClose;
+        }
+        // ── Add worktree ──────────────────────────────────────────────────────
+        KeyCode::Char('N') if !is_burst => {
+            app.input_buf.clear();
+            app.mode = Mode::Prompt(ActionKind::AddWorktree);
         }
         _ => {}
     }

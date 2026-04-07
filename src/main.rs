@@ -18,13 +18,13 @@ mod worktree;
 /// On untagged builds it falls back to the value in Cargo.toml.
 pub const VERSION: &str = env!("TASK_MASTER_VERSION");
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use registry::Registry;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use toml_edit::{value, DocumentMut, Item, Table};
+use toml_edit::{DocumentMut, Item, Table, value};
 use tracing::info;
 
 #[derive(Parser)]

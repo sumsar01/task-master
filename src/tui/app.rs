@@ -1,8 +1,8 @@
-use crate::registry::{write_collapsed, write_group_collapsed, ProjectConfig, Registry, Worktree};
-use crate::stats::{fetch_stats, StatsRow};
+use crate::registry::{ProjectConfig, Registry, Worktree, write_collapsed, write_group_collapsed};
+use crate::stats::{StatsRow, fetch_stats};
 use crate::status::find_live_phase;
 use crate::tmux;
-use crate::ui::theme::{Theme, ALL_THEMES};
+use crate::ui::theme::{ALL_THEMES, Theme};
 use std::{
     collections::HashMap,
     time::{Duration, Instant},

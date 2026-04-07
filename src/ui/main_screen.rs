@@ -3,11 +3,11 @@ use crate::tui::{App, ListEntry};
 use crate::ui::theme::Theme;
 use ansi_to_tui::IntoText;
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph},
-    Frame,
 };
 
 const SPLIT_THRESHOLD: u16 = 160;

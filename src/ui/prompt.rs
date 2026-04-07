@@ -1,11 +1,11 @@
 use crate::tui::{ActionKind, App, Mode};
 use crate::ui::theme::Theme;
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::Modifier,
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
-    Frame,
 };
 
 // ---------------------------------------------------------------------------

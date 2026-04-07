@@ -7,7 +7,7 @@ pub mod theme_picker;
 pub mod update_prompt;
 
 use crate::tui::App;
-use ratatui::{widgets::Block, Frame};
+use ratatui::{Frame, widgets::Block};
 
 /// Top-level render dispatcher.
 /// Draws the active screen, then overlays on top.

@@ -50,11 +50,7 @@ pub fn collect_char_burst(events: &[Event]) -> Option<String> {
             _ => {}
         }
     }
-    if buf.is_empty() {
-        None
-    } else {
-        Some(buf)
-    }
+    if buf.is_empty() { None } else { Some(buf) }
 }
 
 // ---------------------------------------------------------------------------

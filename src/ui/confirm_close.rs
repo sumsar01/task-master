@@ -1,10 +1,10 @@
 use crate::tui::App;
 use crate::ui::theme::Theme;
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
-    Frame,
 };
 
 // ---------------------------------------------------------------------------

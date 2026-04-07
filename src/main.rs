@@ -595,6 +595,24 @@ pub fn cmd_reset(worktree: &str) -> Result<()> {
     Ok(())
 }
 
+/// Close (kill) the tmux window for a worktree.
+///
+/// If the window is running an agent it will be killed immediately.
+pub fn cmd_close(session: &str, worktree: &str) -> Result<()> {
+    let base = tmux::base_window_name(worktree);
+    if let Some(idx) = tmux::find_window_index(session, base) {
+        let target = format!("{}:{}", session, idx);
+        Command::new("tmux")
+            .args(["kill-window", "-t", &target])
+            .status()
+            .with_context(|| format!("Failed to kill tmux window '{}'", target))?;
+        println!("Closed window '{}'.", base);
+    } else {
+        bail!("Window '{}' not found in session '{}'", base, session);
+    }
+    Ok(())
+}
+
 /// Send a prompt directly to the running opencode session in a worktree window.
 ///
 /// Unlike `cmd_spawn`, this does **not** reset the branch, does not kill the

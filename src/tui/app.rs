@@ -1,4 +1,4 @@
-use crate::registry::{write_collapsed, ProjectConfig, Registry, Worktree};
+use crate::registry::{write_collapsed, write_group_collapsed, ProjectConfig, Registry, Worktree};
 use crate::stats::{fetch_stats, StatsRow};
 use crate::status::find_live_phase;
 use crate::tmux;
@@ -15,6 +15,13 @@ use std::{
 /// A single visual row in the worktree list panel.
 #[derive(Debug, Clone)]
 pub enum ListEntry {
+    /// A super-group header row (selectable; Enter/Space toggles collapse).
+    /// When collapsed, all projects and their worktrees in this group are hidden.
+    GroupHeader {
+        /// Group name, e.g. "Work" or "Personal".
+        name: String,
+        collapsed: bool,
+    },
     /// A project section header (selectable; Enter/Space toggles collapse).
     ProjectHeader {
         /// Full project name, e.g. "warehouse-integration-service".
@@ -52,6 +59,8 @@ pub enum Mode {
     Prompt(ActionKind),
     /// Spawn on an active window: user confirmed once, needs Enter again to force.
     ForceConfirm,
+    /// Confirm-close modal: user pressed 'c', waiting for 'y' or any other key.
+    ConfirmClose,
 }
 
 pub struct App {
@@ -60,8 +69,11 @@ pub struct App {
     pub worktrees: Vec<Worktree>,
     /// Project configs snapshot — kept so we can rebuild entries after collapse toggling.
     pub projects: Vec<ProjectConfig>,
-    /// Visual list: project headers, worktree rows, and empty-project placeholders
-    /// interleaved in project order.  Rebuilt by `rebuild_entries`.
+    /// Persisted super-group collapse state, keyed by group name.
+    /// A missing entry means the group is expanded (default).
+    pub group_collapsed: HashMap<String, bool>,
+    /// Visual list: group headers, project headers, worktree rows, and
+    /// empty-project placeholders interleaved in order.  Rebuilt by `rebuild_entries`.
     pub entries: Vec<ListEntry>,
     pub phases: Vec<String>,
     pub list_state: ratatui::widgets::ListState,
@@ -141,8 +153,11 @@ impl App {
         let theme = Theme::from_name(theme_name);
         let theme_picker_cursor = Theme::index_of(theme_name);
 
+        // Load persisted group collapse state from registry.
+        let group_collapsed = registry.group_states.clone();
+
         // Build entries from projects + worktrees, respecting collapse state.
-        let entries = Self::build_entries(&projects, &worktrees);
+        let entries = Self::build_entries(&projects, &worktrees, &group_collapsed);
 
         // Select the first worktree entry (skip headers).
         let initial_selection = entries
@@ -153,6 +168,7 @@ impl App {
         App {
             worktrees,
             projects,
+            group_collapsed,
             entries,
             phases: vec!["?".to_string(); count],
             list_state,
@@ -187,32 +203,120 @@ impl App {
     /// Build the visual entries list from a project configs snapshot and the
     /// flat worktrees list.  Called once on construction and again whenever
     /// collapse state changes.
-    fn build_entries(projects: &[ProjectConfig], worktrees: &[Worktree]) -> Vec<ListEntry> {
+    ///
+    /// The list is structured as a two-level hierarchy:
+    ///   GroupHeader (if any groups are defined)
+    ///     ProjectHeader
+    ///       Worktree rows / EmptyProject
+    ///
+    /// Projects with `group = None` are rendered under an implicit "Ungrouped"
+    /// GroupHeader at the bottom — but only if there is at least one named group,
+    /// so configs without any group assignments remain unchanged (backwards compat).
+    fn build_entries(
+        projects: &[ProjectConfig],
+        worktrees: &[Worktree],
+        group_collapsed: &HashMap<String, bool>,
+    ) -> Vec<ListEntry> {
         let mut entries = Vec::new();
         let mut wt_offset = 0usize;
 
-        for (proj_idx, proj) in projects.iter().enumerate() {
-            entries.push(ListEntry::ProjectHeader {
-                name: proj.name.clone(),
-                collapsed: proj.collapsed,
-                project_idx: proj_idx,
+        // Collect distinct group names in first-seen order.
+        // None → will be placed in "Ungrouped" if any named groups exist.
+        let mut group_order: Vec<Option<String>> = Vec::new();
+        for proj in projects {
+            let key = proj.group.clone();
+            if !group_order.contains(&key) {
+                group_order.push(key);
+            }
+        }
+
+        // Determine whether any named groups exist so we know if we need an
+        // "Ungrouped" header.
+        let has_named_groups = group_order.iter().any(|g| g.is_some());
+
+        // If there are no named groups at all, fall back to the original flat
+        // rendering (no GroupHeader rows emitted).
+        if !has_named_groups {
+            for (proj_idx, proj) in projects.iter().enumerate() {
+                entries.push(ListEntry::ProjectHeader {
+                    name: proj.name.clone(),
+                    collapsed: proj.collapsed,
+                    project_idx: proj_idx,
+                });
+                if !proj.collapsed {
+                    if proj.worktrees.is_empty() {
+                        entries.push(ListEntry::EmptyProject);
+                    } else {
+                        for _ in &proj.worktrees {
+                            entries.push(ListEntry::Worktree {
+                                wt: worktrees[wt_offset].clone(),
+                                worktree_idx: wt_offset,
+                            });
+                            wt_offset += 1;
+                        }
+                    }
+                } else {
+                    wt_offset += proj.worktrees.len();
+                }
+            }
+            return entries;
+        }
+
+        // Named groups exist: emit GroupHeader rows and nest everything beneath them.
+        // Named groups first, then ungrouped projects (if any) under "Ungrouped".
+        let mut named_groups: Vec<Option<String>> = group_order
+            .iter()
+            .filter(|g| g.is_some())
+            .cloned()
+            .collect();
+        let has_ungrouped = group_order.iter().any(|g| g.is_none());
+        if has_ungrouped {
+            named_groups.push(None); // process "Ungrouped" last
+        }
+
+        // We need a fresh wt_offset pass because projects are filtered per group.
+        // Rebuild a mapping: project_idx → worktree_start_offset in flat list.
+        let mut proj_wt_start = vec![0usize; projects.len()];
+        let mut offset = 0usize;
+        for (i, proj) in projects.iter().enumerate() {
+            proj_wt_start[i] = offset;
+            offset += proj.worktrees.len();
+        }
+
+        for group_key in &named_groups {
+            let group_display_name = group_key.as_deref().unwrap_or("Ungrouped").to_string();
+            let group_is_collapsed = *group_collapsed.get(&group_display_name).unwrap_or(&false);
+
+            entries.push(ListEntry::GroupHeader {
+                name: group_display_name.clone(),
+                collapsed: group_is_collapsed,
             });
 
-            if !proj.collapsed {
-                if proj.worktrees.is_empty() {
-                    entries.push(ListEntry::EmptyProject);
-                } else {
-                    for _ in &proj.worktrees {
-                        entries.push(ListEntry::Worktree {
-                            wt: worktrees[wt_offset].clone(),
-                            worktree_idx: wt_offset,
-                        });
-                        wt_offset += 1;
+            if !group_is_collapsed {
+                // Emit projects belonging to this group, in their original order.
+                for (proj_idx, proj) in projects.iter().enumerate() {
+                    if proj.group.as_deref() != group_key.as_deref() {
+                        continue;
+                    }
+                    entries.push(ListEntry::ProjectHeader {
+                        name: proj.name.clone(),
+                        collapsed: proj.collapsed,
+                        project_idx: proj_idx,
+                    });
+                    let wt_start = proj_wt_start[proj_idx];
+                    if !proj.collapsed {
+                        if proj.worktrees.is_empty() {
+                            entries.push(ListEntry::EmptyProject);
+                        } else {
+                            for i in 0..proj.worktrees.len() {
+                                entries.push(ListEntry::Worktree {
+                                    wt: worktrees[wt_start + i].clone(),
+                                    worktree_idx: wt_start + i,
+                                });
+                            }
+                        }
                     }
                 }
-            } else {
-                // Advance the flat worktree offset even though we don't emit rows.
-                wt_offset += proj.worktrees.len();
             }
         }
 
@@ -222,7 +326,7 @@ impl App {
     /// Rebuild `self.entries` from the current `projects` snapshot.
     pub fn rebuild_entries(&mut self) {
         let current_wt_idx = self.selected_worktree_idx();
-        self.entries = Self::build_entries(&self.projects, &self.worktrees);
+        self.entries = Self::build_entries(&self.projects, &self.worktrees, &self.group_collapsed);
 
         // Try to keep selection on the same worktree after rebuild.
         let new_sel = if let Some(wt_idx) = current_wt_idx {
@@ -257,6 +361,38 @@ impl App {
 
         // Persist (best-effort; don't crash TUI on write failure).
         let _ = write_collapsed(&registry.base_dir, &project_name, new_collapsed);
+    }
+
+    /// Toggle the collapsed state of the super-group at `entry_idx` and persist
+    /// the change to task-master.toml via `write_group_collapsed`.
+    pub fn toggle_group_collapse(&mut self, entry_idx: usize, registry: &Registry) {
+        let (group_name, new_collapsed) =
+            if let Some(ListEntry::GroupHeader {
+                name, collapsed, ..
+            }) = self.entries.get(entry_idx)
+            {
+                (name.clone(), !*collapsed)
+            } else {
+                return;
+            };
+
+        self.group_collapsed
+            .insert(group_name.clone(), new_collapsed);
+        self.rebuild_entries();
+
+        // Try to keep the cursor on the GroupHeader row after rebuild.
+        // rebuild_entries already handles selection preservation, but if the
+        // cursor was on a worktree that just got hidden we want to land on the
+        // group header itself instead.
+        if self.list_state.selected().is_none() {
+            let header_pos = self.entries.iter().position(
+                |e| matches!(e, ListEntry::GroupHeader { name, .. } if name == &group_name),
+            );
+            self.list_state.select(header_pos.or(Some(0)));
+        }
+
+        // Persist (best-effort; don't crash TUI on write failure).
+        let _ = write_group_collapsed(&registry.base_dir, &group_name, new_collapsed);
     }
 
     pub fn selected(&self) -> Option<usize> {

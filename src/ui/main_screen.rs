@@ -150,12 +150,20 @@ fn render_worktree_list(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) {
             };
 
             match entry {
+                ListEntry::GroupHeader { name, collapsed } => {
+                    let icon = if *collapsed { "○" } else { "●" };
+                    let line = Line::from(vec![Span::styled(
+                        format!("{} {} ", icon, name),
+                        base.fg(t.text_accent).add_modifier(Modifier::BOLD),
+                    )]);
+                    ListItem::new(line)
+                }
                 ListEntry::ProjectHeader {
                     name, collapsed, ..
                 } => {
                     let icon = if *collapsed { "▶" } else { "▼" };
                     let line = Line::from(vec![Span::styled(
-                        format!(" {} {} ", icon, name),
+                        format!("  {} {} ", icon, name),
                         base.fg(t.section_header).add_modifier(Modifier::BOLD),
                     )]);
                     ListItem::new(line)
@@ -168,14 +176,14 @@ fn render_worktree_list(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) {
                         .unwrap_or("?");
                     let phase_color = t.phase_color(phase);
                     let line = Line::from(vec![
-                        Span::styled(format!("    {:<18}", wt.window_name), base.fg(t.text)),
+                        Span::styled(format!("      {:<18}", wt.window_name), base.fg(t.text)),
                         Span::styled(format!("[{}]", phase), base.fg(phase_color)),
                     ]);
                     ListItem::new(line)
                 }
                 ListEntry::EmptyProject => {
                     let line = Line::from(vec![Span::styled(
-                        "    (no worktrees)",
+                        "      (no worktrees)",
                         Style::default().fg(t.text_dim),
                     )]);
                     ListItem::new(line)

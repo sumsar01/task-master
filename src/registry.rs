@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use toml_edit::DocumentMut;
@@ -23,6 +24,15 @@ pub struct ProjectConfig {
     /// Whether this project's worktree list is collapsed in the TUI.
     #[serde(default = "default_collapsed")]
     pub collapsed: bool,
+    /// Optional super-group label shown in the TUI (e.g. "Work", "Personal").
+    /// Projects with the same group value are rendered under a shared GroupHeader.
+    /// Projects without a group fall into an implicit "Ungrouped" section.
+    #[serde(default)]
+    pub group: Option<String>,
+    /// Optional bounded-context tag for future filter/grouping (store-only for now).
+    /// E.g. "warehouse", "fulfillment".  Not displayed in the TUI yet.
+    #[serde(default)]
+    pub context: Option<String>,
 }
 
 fn default_theme() -> String {
@@ -48,6 +58,10 @@ struct RawConfig {
     projects: Vec<ProjectConfig>,
     #[serde(default)]
     ui: UiConfig,
+    /// Persisted group collapse state written by the TUI.
+    /// Keys are group names (e.g. "Work"), values are whether the group is collapsed.
+    #[serde(default)]
+    group_states: HashMap<String, bool>,
 }
 
 /// A fully-resolved worktree ready for use.
@@ -71,6 +85,9 @@ pub struct Registry {
     pub worktrees: Vec<Worktree>,
     pub base_dir: PathBuf,
     pub ui: UiConfig,
+    /// Persisted collapse state for super-groups, keyed by group name.
+    /// A missing entry means the group is expanded (default).
+    pub group_states: HashMap<String, bool>,
 }
 
 impl Registry {
@@ -118,6 +135,7 @@ impl Registry {
             worktrees,
             base_dir,
             ui: raw.ui,
+            group_states: raw.group_states,
         })
     }
 
@@ -209,6 +227,35 @@ pub fn write_collapsed(base_dir: &PathBuf, project_name: &str, collapsed: bool) 
             break;
         }
     }
+
+    fs::write(&config_path, doc.to_string())
+        .with_context(|| format!("Failed to write config: {}", config_path.display()))?;
+    Ok(())
+}
+
+/// Update the `[group_states]` table in the TOML config to record whether a
+/// super-group is collapsed.  The table is created if it does not exist yet.
+///
+/// Example resulting TOML:
+/// ```toml
+/// [group_states]
+/// Work = false
+/// Personal = true
+/// ```
+pub fn write_group_collapsed(base_dir: &PathBuf, group_name: &str, collapsed: bool) -> Result<()> {
+    let config_path = base_dir.join("task-master.toml");
+    let contents = fs::read_to_string(&config_path)
+        .with_context(|| format!("Failed to read config: {}", config_path.display()))?;
+
+    let mut doc = contents
+        .parse::<DocumentMut>()
+        .context("Failed to parse task-master.toml")?;
+
+    // Ensure the [group_states] table exists.
+    if doc.get("group_states").is_none() {
+        doc["group_states"] = toml_edit::table();
+    }
+    doc["group_states"][group_name] = toml_edit::value(collapsed);
 
     fs::write(&config_path, doc.to_string())
         .with_context(|| format!("Failed to write config: {}", config_path.display()))?;
@@ -424,6 +471,68 @@ repo = "projects/empty-service"
     }
 
     #[test]
+    fn test_group_and_context_fields_present() {
+        let toml = r#"
+[[projects]]
+name = "warehouse-service"
+short = "WS"
+repo = "projects/warehouse-service"
+group = "Work"
+context = "warehouse"
+
+[[projects.worktrees]]
+name = "main"
+"#;
+        let reg = registry_from_toml(toml).unwrap();
+        let proj = &reg.projects[0];
+        assert_eq!(proj.group, Some("Work".to_string()));
+        assert_eq!(proj.context, Some("warehouse".to_string()));
+    }
+
+    #[test]
+    fn test_group_and_context_fields_absent_default_to_none() {
+        let reg = registry_from_toml(SIMPLE_TOML).unwrap();
+        for proj in &reg.projects {
+            assert!(
+                proj.group.is_none(),
+                "group should default to None for project '{}'",
+                proj.name
+            );
+            assert!(
+                proj.context.is_none(),
+                "context should default to None for project '{}'",
+                proj.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_projects_with_mixed_group_assignments() {
+        let toml = r#"
+[[projects]]
+name = "work-service"
+short = "WS"
+repo = "projects/work-service"
+group = "Work"
+
+[[projects]]
+name = "personal-project"
+short = "PP"
+repo = "projects/personal-project"
+group = "Personal"
+
+[[projects]]
+name = "ungrouped-service"
+short = "UG"
+repo = "projects/ungrouped-service"
+"#;
+        let reg = registry_from_toml(toml).unwrap();
+        assert_eq!(reg.projects[0].group, Some("Work".to_string()));
+        assert_eq!(reg.projects[1].group, Some("Personal".to_string()));
+        assert_eq!(reg.projects[2].group, None);
+    }
+
+    #[test]
     fn test_all_worktrees_enumerated() {
         let reg = registry_from_toml(SIMPLE_TOML).unwrap();
         let names: Vec<&str> = reg
@@ -478,5 +587,121 @@ repo = "projects/empty-service"
         // Must parse without error.
         let reg = Registry::load_from_str(&result, PathBuf::from("/base")).unwrap();
         assert_eq!(reg.worktrees.len(), 2); // olive + OTH-main remain
+    }
+
+    // -------------------------------------------------------------------------
+    // group_states loading
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_group_states_absent_defaults_to_empty_map() {
+        let reg = registry_from_toml(SIMPLE_TOML).unwrap();
+        assert!(
+            reg.group_states.is_empty(),
+            "group_states should default to empty HashMap"
+        );
+    }
+
+    #[test]
+    fn test_group_states_loaded_from_toml() {
+        let toml = r#"
+[[projects]]
+name = "work-service"
+short = "WS"
+repo = "projects/work-service"
+group = "Work"
+
+[group_states]
+Work = true
+Personal = false
+"#;
+        let reg = registry_from_toml(toml).unwrap();
+        assert_eq!(reg.group_states.get("Work"), Some(&true));
+        assert_eq!(reg.group_states.get("Personal"), Some(&false));
+    }
+
+    // -------------------------------------------------------------------------
+    // write_group_collapsed
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_write_group_collapsed_creates_section_and_sets_value() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("task-master.toml");
+        let initial = r#"
+[[projects]]
+name = "work-service"
+short = "WS"
+repo = "projects/work-service"
+group = "Work"
+"#;
+        std::fs::File::create(&config_path)
+            .unwrap()
+            .write_all(initial.as_bytes())
+            .unwrap();
+
+        super::write_group_collapsed(&dir.path().to_path_buf(), "Work", true).unwrap();
+
+        let written = std::fs::read_to_string(&config_path).unwrap();
+        let reg = Registry::load_from_str(&written, dir.path().to_path_buf()).unwrap();
+        assert_eq!(reg.group_states.get("Work"), Some(&true));
+    }
+
+    #[test]
+    fn test_write_group_collapsed_updates_existing_value() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("task-master.toml");
+        let initial = r#"
+[[projects]]
+name = "work-service"
+short = "WS"
+repo = "projects/work-service"
+
+[group_states]
+Work = true
+"#;
+        std::fs::File::create(&config_path)
+            .unwrap()
+            .write_all(initial.as_bytes())
+            .unwrap();
+
+        super::write_group_collapsed(&dir.path().to_path_buf(), "Work", false).unwrap();
+
+        let written = std::fs::read_to_string(&config_path).unwrap();
+        let reg = Registry::load_from_str(&written, dir.path().to_path_buf()).unwrap();
+        assert_eq!(reg.group_states.get("Work"), Some(&false));
+    }
+
+    #[test]
+    fn test_write_group_collapsed_leaves_other_groups_untouched() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("task-master.toml");
+        let initial = r#"
+[[projects]]
+name = "work-service"
+short = "WS"
+repo = "projects/work-service"
+
+[group_states]
+Personal = false
+"#;
+        std::fs::File::create(&config_path)
+            .unwrap()
+            .write_all(initial.as_bytes())
+            .unwrap();
+
+        super::write_group_collapsed(&dir.path().to_path_buf(), "Work", true).unwrap();
+
+        let written = std::fs::read_to_string(&config_path).unwrap();
+        let reg = Registry::load_from_str(&written, dir.path().to_path_buf()).unwrap();
+        assert_eq!(reg.group_states.get("Work"), Some(&true));
+        assert_eq!(
+            reg.group_states.get("Personal"),
+            Some(&false),
+            "Personal should be untouched"
+        );
     }
 }

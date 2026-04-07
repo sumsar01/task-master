@@ -2,6 +2,6 @@
   "database": "dolt",
   "backend": "dolt",
   "dolt_mode": "server",
-  "dolt_database": "task_master",
+  "dolt_database": "dolt",
   "project_id": "e5828e70-6a58-4797-adf0-11c44df7ae55"
 }

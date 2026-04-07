@@ -16,6 +16,13 @@ theme = "tokyonight"
 #   collapsed — (optional) hide the project's worktree rows in the TUI list.
 #               Toggle with Enter/Space when the project header is selected.
 #               The TUI writes this field automatically when you collapse/expand.
+#   group     — (optional) super-group label for the TUI list (e.g. "Work", "Personal").
+#               Projects sharing the same group value are shown under a collapsible
+#               GroupHeader row.  Projects without a group are listed under "Ungrouped".
+#               Toggle a group open/closed with Enter/Space on its header row.
+#               The TUI writes group collapse state to [group_states] automatically.
+#   context   — (optional) bounded-context tag for future filter/grouping
+#               (e.g. "warehouse", "fulfillment").  Stored but not displayed yet.
 #
 # Each [[projects.worktrees]] block registers one worktree inside that repo.
 #   name   — worktree directory name; also becomes the window suffix
@@ -24,6 +31,8 @@ theme = "tokyonight"
 name = "my-service"
 short = "SVC"
 repo = "projects/my-service"
+group = "Work"            # super-group shown in TUI
+context = "warehouse"     # bounded-context tag (for future filtering)
 
   [[projects.worktrees]]
   name = "main"
@@ -35,6 +44,7 @@ repo = "projects/my-service"
 name = "another-project"
 short = "AP"
 repo = "projects/another-project"
+group = "Personal"
 
   [[projects.worktrees]]
   name = "main"

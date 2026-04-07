@@ -133,11 +133,17 @@ fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()
                 app.refresh_preview();
             }
         }
-        // ── Collapse / expand project section ─────────────────────────────────
+        // ── Collapse / expand project section or super-group ──────────────────
         KeyCode::Enter | KeyCode::Char(' ') => {
             if let Some(i) = app.selected() {
-                if matches!(app.entries.get(i), Some(ListEntry::ProjectHeader { .. })) {
-                    app.toggle_collapse(i, registry);
+                match app.entries.get(i) {
+                    Some(ListEntry::GroupHeader { .. }) => {
+                        app.toggle_group_collapse(i, registry);
+                    }
+                    Some(ListEntry::ProjectHeader { .. }) => {
+                        app.toggle_collapse(i, registry);
+                    }
+                    _ => {}
                 }
             }
         }

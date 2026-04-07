@@ -117,6 +117,25 @@ pub fn execute_qa(app: &mut App, registry: &Registry) -> Result<()> {
     Ok(())
 }
 
+pub fn execute_close(app: &mut App) -> Result<()> {
+    let wt_name = match app.selected_worktree() {
+        Some(wt) => wt.window_name.clone(),
+        None => return Ok(()),
+    };
+    match crate::cmd_close(&app.session, &wt_name) {
+        Ok(()) => {
+            app.mode = Mode::Normal;
+            app.set_status(format!("Closed {}.", wt_name));
+            app.refresh_phases();
+        }
+        Err(e) => {
+            app.mode = Mode::Normal;
+            app.set_status(format!("Close failed: {}", e));
+        }
+    }
+    Ok(())
+}
+
 pub fn execute_send(app: &mut App, registry: &Registry) -> Result<()> {
     let wt_name = match app.selected_worktree() {
         Some(wt) => wt.window_name.clone(),

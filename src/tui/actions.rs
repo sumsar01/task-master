@@ -124,8 +124,21 @@ pub fn execute_close(app: &mut App) -> Result<()> {
     };
     match crate::cmd_close(&app.session, &wt_name) {
         Ok(()) => {
+            // Reclaim focus after the kill-window call. Killing a tmux window
+            // can briefly steal focus away from the TUI window (tmux switches to
+            // an adjacent window), which corrupts the alternate-screen buffer
+            // and causes ratatui's incremental diff renderer to leave stale cells.
+            // The double-select + 250ms sleep is the same pattern used by
+            // execute_spawn / execute_plan / execute_qa (see lines above).
+            let _ = tmux::select_tui_window(&app.session, &app.tui_window_name);
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            let _ = tmux::select_tui_window(&app.session, &app.tui_window_name);
+
             app.mode = Mode::Normal;
             app.set_status(format!("Closed {}.", wt_name));
+            // Force a full repaint so the confirm-close modal cells and any
+            // other stale areas are cleared on the next frame.
+            app.needs_full_redraw = true;
             app.refresh_phases();
         }
         Err(e) => {

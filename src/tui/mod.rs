@@ -300,4 +300,141 @@ name = "alpha"
         let wt_idx = app.selected_worktree_idx().unwrap();
         assert!(app.stats_cache.get(&wt_idx).is_none());
     }
+
+    // -------------------------------------------------------------------------
+    // Close-window TUI state tests (regression guards for fix/close-tui-artifacts)
+    // -------------------------------------------------------------------------
+
+    /// Helper: build a minimal App with one worktree selected, in ConfirmClose mode.
+    fn make_app_confirm_close() -> App {
+        use crate::registry::Registry;
+        use std::path::PathBuf;
+
+        let toml = r#"
+[[projects]]
+name = "svc"
+short = "S"
+repo = "projects/svc"
+[[projects.worktrees]]
+name = "a"
+"#;
+        let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
+        let mut app = App::new(&reg, "test".to_string(), "tui-window".to_string());
+        app.mode = Mode::ConfirmClose;
+        app
+    }
+
+    #[test]
+    fn test_confirm_close_cancel_resets_mode_to_normal() {
+        use crate::registry::Registry;
+        use crate::tui::input::handle_key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use std::path::PathBuf;
+
+        let toml = r#"
+[[projects]]
+name = "svc"
+short = "S"
+repo = "projects/svc"
+[[projects.worktrees]]
+name = "a"
+"#;
+        let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
+        let mut app = make_app_confirm_close();
+        // Press Escape to cancel the close modal.
+        handle_key(&mut app, &reg, KeyCode::Esc, KeyModifiers::NONE).unwrap();
+        assert_eq!(
+            app.mode,
+            Mode::Normal,
+            "cancel should return to Normal mode"
+        );
+    }
+
+    #[test]
+    fn test_confirm_close_cancel_sets_needs_full_redraw() {
+        use crate::registry::Registry;
+        use crate::tui::input::handle_key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use std::path::PathBuf;
+
+        let toml = r#"
+[[projects]]
+name = "svc"
+short = "S"
+repo = "projects/svc"
+[[projects.worktrees]]
+name = "a"
+"#;
+        let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
+        let mut app = make_app_confirm_close();
+        app.needs_full_redraw = false;
+        // Press any non-y key to cancel — should trigger a full redraw so
+        // the modal ghost cells are cleared on the next frame.
+        handle_key(&mut app, &reg, KeyCode::Esc, KeyModifiers::NONE).unwrap();
+        assert!(
+            app.needs_full_redraw,
+            "cancelling close modal must set needs_full_redraw to clear ghost cells"
+        );
+    }
+
+    #[test]
+    fn test_confirm_close_cancel_clears_status_msg() {
+        use crate::registry::Registry;
+        use crate::tui::input::handle_key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use std::path::PathBuf;
+
+        let toml = r#"
+[[projects]]
+name = "svc"
+short = "S"
+repo = "projects/svc"
+[[projects.worktrees]]
+name = "a"
+"#;
+        let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
+        let mut app = make_app_confirm_close();
+        app.set_status("some warning about the running agent");
+        handle_key(&mut app, &reg, KeyCode::Esc, KeyModifiers::NONE).unwrap();
+        assert!(
+            app.status_msg.is_none(),
+            "cancelling close modal should clear the status message"
+        );
+    }
+
+    #[test]
+    fn test_confirm_close_cancel_any_non_y_key() {
+        use crate::registry::Registry;
+        use crate::tui::input::handle_key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use std::path::PathBuf;
+
+        let toml = r#"
+[[projects]]
+name = "svc"
+short = "S"
+repo = "projects/svc"
+[[projects.worktrees]]
+name = "a"
+"#;
+        let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
+
+        // All of these non-y keys should cancel and set needs_full_redraw.
+        for code in [
+            KeyCode::Char('n'),
+            KeyCode::Char('q'),
+            KeyCode::Enter,
+            KeyCode::Backspace,
+        ] {
+            let mut app = make_app_confirm_close();
+            app.needs_full_redraw = false;
+            handle_key(&mut app, &reg, code, KeyModifiers::NONE).unwrap();
+            assert_eq!(app.mode, Mode::Normal, "{:?} should cancel to Normal", code);
+            assert!(
+                app.needs_full_redraw,
+                "{:?} cancel should set needs_full_redraw",
+                code
+            );
+        }
+    }
 }

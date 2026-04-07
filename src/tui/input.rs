@@ -433,9 +433,13 @@ fn handle_confirm_close(app: &mut App, code: KeyCode) -> Result<()> {
             execute_close(app)?;
         }
         _ => {
-            // Any other key cancels.
+            // Any other key cancels. Force a full repaint so the modal's
+            // bordered box cells are cleared — ratatui's incremental diff
+            // renderer can leave ghost cells if the terminal state was
+            // disturbed while the overlay was visible.
             app.mode = Mode::Normal;
             app.status_msg = None;
+            app.needs_full_redraw = true;
         }
     }
     Ok(())

@@ -148,21 +148,13 @@ pub fn replace_window_process(
     })?;
     let target = format!("{}:{}", session, idx);
 
-    // Write the prompt to a temp file so we don't send a huge/multi-line string
-    // through tmux send-keys (which would mangle it or fire premature Enters).
     let prompt_file = write_prompt_file(prompt)?;
-
-    // Two C-c presses to ensure the opencode TUI exits cleanly.
-    tmux(&["send-keys", "-t", &target, "C-c"])?;
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    tmux(&["send-keys", "-t", &target, "C-c"])?;
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    // cd to working dir then launch fresh opencode TUI with the prompt.
     let opencode_cmd = build_opencode_cmd(&prompt_file, agent);
     let cmd = format!("cd {} && {}", shell_escape(working_dir), opencode_cmd);
-    tmux(&["send-keys", "-t", &target, &cmd])?;
-    tmux(&["send-keys", "-t", &target, "Enter"])?;
+
+    // respawn-pane -k atomically kills the running process and starts the new
+    // command — no C-c, no sleeps, no ZLE timing races.
+    launch_in_existing_window(&target, working_dir, &cmd)?;
 
     Ok(())
 }
@@ -219,25 +211,11 @@ pub fn spawn_window(
 
     // New window — always created with the :dev phase suffix.
     let initial_name = format!("{}:dev", window_name);
-    let end_target = format!("{}:", session);
     let opencode_cmd = build_opencode_cmd(&prompt_file, agent);
-    tmux(&[
-        "new-window",
-        "-d", // don't switch to it
-        "-t",
-        &end_target,
-        "-n",
-        &initial_name,
-        "-c",
-        working_dir,
-    ])?;
 
-    // After creation the window is named initial_name; find it by base to get its index.
-    let idx = find_window_index(session, window_name)
-        .with_context(|| format!("Could not find newly created window '{}'", initial_name))?;
-    let target = format!("{}:{}", session, idx);
-    tmux(&["send-keys", "-t", &target, &opencode_cmd])?;
-    tmux(&["send-keys", "-t", &target, "Enter"])?;
+    // Pass the command directly to new-window so tmux runs it via /bin/sh
+    // immediately — no send-keys ZLE timing races, no startup sleep needed.
+    launch_in_new_window(session, &initial_name, working_dir, &opencode_cmd)?;
 
     Ok(true) // true = new window
 }
@@ -266,23 +244,9 @@ pub fn spawn_named_window_raw(
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
 
-    let end_target = format!("{}:", session);
-    tmux(&[
-        "new-window",
-        "-d",
-        "-t",
-        &end_target,
-        "-n",
-        name,
-        "-c",
-        working_dir,
-    ])?;
-    let idx = find_window_index(session, name)
-        .with_context(|| format!("Could not find newly created window '{}'", name))?;
-    let target = format!("{}:{}", session, idx);
-    tmux(&["send-keys", "-t", &target, cmd])?;
-    tmux(&["send-keys", "-t", &target, "Enter"])?;
-
+    // Pass the command directly to new-window so tmux runs it via /bin/sh
+    // immediately — no send-keys ZLE timing races.
+    launch_in_new_window(session, name, working_dir, cmd)?;
     Ok(())
 }
 
@@ -321,6 +285,46 @@ fn build_opencode_cmd(prompt_file: &str, agent: Option<&str>) -> String {
 
 pub fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Launch `cmd` in a new background tmux window named `name`, rooted at
+/// `working_dir`. The command is passed directly as a positional argument to
+/// `tmux new-window`, so tmux runs it via `/bin/sh -c` immediately — no
+/// `send-keys` ZLE timing races. `; exec $SHELL` is appended so the window
+/// stays open (drops to a shell) when the command exits.
+fn launch_in_new_window(session: &str, name: &str, working_dir: &str, cmd: &str) -> Result<()> {
+    let shell_cmd = format!("{}; exec $SHELL", cmd);
+    let end_target = format!("{}:", session);
+    tmux(&[
+        "new-window",
+        "-d",
+        "-t",
+        &end_target,
+        "-n",
+        name,
+        "-c",
+        working_dir,
+        &shell_cmd,
+    ])?;
+    Ok(())
+}
+
+/// Kill whatever is running in pane `target` and start `cmd` atomically using
+/// `tmux respawn-pane -k`. No C-c, no sleeps, no ZLE races. `; exec $SHELL`
+/// is appended so the window stays open (drops to a shell) when the command
+/// exits.
+fn launch_in_existing_window(target: &str, working_dir: &str, cmd: &str) -> Result<()> {
+    let shell_cmd = format!("{}; exec $SHELL", cmd);
+    tmux(&[
+        "respawn-pane",
+        "-k",
+        "-t",
+        target,
+        "-c",
+        working_dir,
+        &shell_cmd,
+    ])?;
+    Ok(())
 }
 
 /// Strip the right-hand sidebar column that opencode renders in its two-column

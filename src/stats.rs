@@ -22,11 +22,7 @@ fn opencode_db_path() -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| dirs_next_home().join(".local").join("share"));
     let p = base.join("opencode").join("opencode.db");
-    if p.exists() {
-        Some(p)
-    } else {
-        None
-    }
+    if p.exists() { Some(p) } else { None }
 }
 
 /// Portable home-directory resolution (avoids a heavy dependency).
@@ -151,11 +147,7 @@ pub fn parse_stats_output(text: &str) -> Option<StatsRow> {
         }
     }
 
-    if found_any {
-        Some(row)
-    } else {
-        None
-    }
+    if found_any { Some(row) } else { None }
 }
 
 /// Extract the value for a given field label from a stripped table line.
@@ -163,11 +155,7 @@ pub fn parse_stats_output(text: &str) -> Option<StatsRow> {
 fn extract_field(line: &str, label: &str) -> Option<String> {
     if line.starts_with(label) {
         let rest = line[label.len()..].trim().to_string();
-        if rest.is_empty() {
-            None
-        } else {
-            Some(rest)
-        }
+        if rest.is_empty() { None } else { Some(rest) }
     } else {
         None
     }

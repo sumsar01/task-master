@@ -1,10 +1,10 @@
 use crate::hooks;
 use crate::registry::{self, Registry};
 use crate::tmux;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use toml_edit::{value, DocumentMut, Item, Table};
+use toml_edit::{DocumentMut, Item, Table, value};
 use tracing::info;
 
 // ---------------------------------------------------------------------------

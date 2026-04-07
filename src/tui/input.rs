@@ -50,11 +50,7 @@ pub fn collect_char_burst(events: &[Event]) -> Option<String> {
             _ => {}
         }
     }
-    if buf.is_empty() {
-        None
-    } else {
-        Some(buf)
-    }
+    if buf.is_empty() { None } else { Some(buf) }
 }
 
 // ---------------------------------------------------------------------------
@@ -82,6 +78,8 @@ pub fn handle_key(
         Mode::Prompt(kind) => handle_prompt(app, registry, code, modifiers, kind.clone()),
         Mode::ForceConfirm => handle_force_confirm(app, registry, code),
         Mode::ConfirmClose => handle_confirm_close(app, code),
+        Mode::UpdateAvailable(info) => handle_update_available(app, code, info.clone()),
+        Mode::Updating => Ok(()), // block all keys while downloading
     }
 }
 
@@ -441,6 +439,30 @@ fn handle_confirm_close(app: &mut App, code: KeyCode) -> Result<()> {
             app.status_msg = None;
             app.needs_full_redraw = true;
         }
+    }
+    Ok(())
+}
+
+fn handle_update_available(
+    app: &mut App,
+    code: KeyCode,
+    info: crate::update::UpdateInfo,
+) -> Result<()> {
+    match code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            // Switch to Updating mode so the TUI renders the progress overlay,
+            // then perform the download synchronously.
+            app.mode = Mode::Updating;
+            // We return Ok here — the actual download is triggered in the event
+            // loop's next tick via App::perform_update(), which is called
+            // immediately after handle_key returns when mode == Updating.
+            // Store the info for retrieval by perform_update.
+            app.pending_update_info = Some(info);
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Char('q') => {
+            app.mode = Mode::Normal;
+        }
+        _ => {}
     }
     Ok(())
 }

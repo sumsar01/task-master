@@ -4,9 +4,10 @@ pub mod main_screen;
 pub mod prompt;
 pub mod theme;
 pub mod theme_picker;
+pub mod update_prompt;
 
 use crate::tui::App;
-use ratatui::{widgets::Block, Frame};
+use ratatui::{Frame, widgets::Block};
 
 /// Top-level render dispatcher.
 /// Draws the active screen, then overlays on top.
@@ -40,5 +41,13 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // Confirm-close modal — shown on top of everything when closing a window.
     if app.mode == crate::tui::Mode::ConfirmClose {
         confirm_close::render(f, app, &t);
+    }
+
+    // Update-available / downloading overlay — shown highest (last drawn).
+    if matches!(
+        app.mode,
+        crate::tui::Mode::UpdateAvailable(_) | crate::tui::Mode::Updating
+    ) {
+        update_prompt::render(f, app, &t);
     }
 }

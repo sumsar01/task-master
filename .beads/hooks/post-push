@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+_BIN='/Users/rasmus/git/github.com/whiteaway/task-master/target/release/task-master'
+_SHORT="TM"
+
+# Derive the worktree leaf name from $GIT_DIR at runtime.
+# For a linked worktree GIT_DIR is .../worktrees/<name>; basename gives <name>.
+# Fall back to "main" if GIT_DIR is not set or points to the bare repo itself.
+_leaf=$(basename "${GIT_DIR:-.}")
+if [ "$_leaf" = "." ] || [ "$_leaf" = "" ]; then
+    _leaf="main"
+fi
+_WT="${_SHORT}-${_leaf}"
+
+while read -r _lref _lsha _rref _rsha; do
+    [ "$_lsha" = "0000000000000000000000000000000000000000" ] && continue
+    _branch="${_rref#refs/heads/}"
+    [ "$_branch" = "$_rref" ] && continue
+    command -v gh &>/dev/null || continue
+    _pr=$(gh pr view "$_branch" --json number --jq '.number' 2>/dev/null || true)
+    [ -z "$_pr" ] && continue
+    nohup "$_BIN" qa "$_WT" "$_pr" </dev/null >"/tmp/.qa-hook-${_pr}.log" 2>&1 &
+done

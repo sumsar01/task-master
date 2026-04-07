@@ -61,6 +61,10 @@ pub enum Mode {
     ForceConfirm,
     /// Confirm-close modal: user pressed 'c', waiting for 'y' or any other key.
     ConfirmClose,
+    /// A newer version is available; prompt the user to update.
+    UpdateAvailable(crate::update::UpdateInfo),
+    /// An update is currently being downloaded (blocks the event loop).
+    Updating,
 }
 
 pub struct App {
@@ -140,6 +144,16 @@ pub struct App {
     /// cells, and a tmux window-switch round-trip can leave the terminal state
     /// stale enough that the diff misses cells that need clearing.
     pub needs_full_redraw: bool,
+
+    /// Receiver for the background update-check thread.
+    /// Set once in `cmd_tui`; polled on every tick.
+    /// When a message arrives and `mode` is `Normal`, transitions to
+    /// `Mode::UpdateAvailable`.
+    pub update_rx: Option<std::sync::mpsc::Receiver<crate::update::UpdateInfo>>,
+
+    /// Holds the `UpdateInfo` between the user pressing 'y' in the overlay and
+    /// the actual download being performed on the next event-loop iteration.
+    pub pending_update_info: Option<crate::update::UpdateInfo>,
 }
 
 impl App {
@@ -197,6 +211,8 @@ impl App {
             history_idx: None,
             history_draft: String::new(),
             needs_full_redraw: false,
+            update_rx: None,
+            pending_update_info: None,
         }
     }
 
@@ -623,5 +639,62 @@ impl App {
         } else {
             true
         }
+    }
+
+    /// Perform the self-update: download the new binary, replace the current
+    /// executable, re-run `install-qa-hooks`, then exit.
+    ///
+    /// Called from the event loop immediately after the mode transitions to
+    /// `Mode::Updating`.  The TUI renders the "Downloading…" overlay on the
+    /// frame just before this runs.
+    ///
+    /// On any failure, prints an error status and returns to Normal mode so the
+    /// user can continue using the TUI.
+    pub fn perform_update(&mut self) {
+        let info = match self.pending_update_info.take() {
+            Some(i) => i,
+            None => {
+                self.mode = Mode::Normal;
+                return;
+            }
+        };
+
+        // Download to a temp file next to the current exe.
+        let current_exe = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(e) => {
+                self.set_status(format!("Update failed: cannot find current exe: {e}"));
+                self.mode = Mode::Normal;
+                return;
+            }
+        };
+
+        let tmp_path = current_exe.with_extension("new");
+
+        if let Err(e) = crate::update::download_binary(&info.download_url, &tmp_path) {
+            self.set_status(format!("Update failed: {e}"));
+            self.mode = Mode::Normal;
+            return;
+        }
+
+        if let Err(e) = crate::update::replace_current_binary(&tmp_path) {
+            self.set_status(format!("Update failed: {e}"));
+            // Clean up partial download.
+            let _ = std::fs::remove_file(&tmp_path);
+            self.mode = Mode::Normal;
+            return;
+        }
+
+        // Re-run install-qa-hooks so all post-push scripts point at the new binary.
+        let _ = std::process::Command::new(&current_exe)
+            .arg("install-qa-hooks")
+            .status();
+
+        // Signal the event loop to quit — the user must restart to run the new binary.
+        self.should_quit = true;
+        println!(
+            "\n\nUpdated to v{}. Restart task-master.\n",
+            info.latest_version
+        );
     }
 }

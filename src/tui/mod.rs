@@ -14,7 +14,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Frame, Terminal};
-use std::{io, time::Duration};
+use std::{io, sync::mpsc, time::Duration};
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -34,6 +34,18 @@ pub fn cmd_tui(registry: &Registry) -> Result<()> {
     let mut app = App::new(registry, session.clone(), tui_window_name);
     app.refresh_phases();
     app.load_stats_for_selected();
+
+    // Spawn a background thread to check for updates.
+    // The thread sends at most one message and then exits.
+    // We never block the TUI waiting for it — the result is picked up on the
+    // next 2-second tick after the check completes.
+    let (update_tx, update_rx) = mpsc::channel::<crate::update::UpdateInfo>();
+    std::thread::spawn(move || {
+        if let Some(info) = crate::update::check_for_update() {
+            let _ = update_tx.send(info);
+        }
+    });
+    app.update_rx = Some(update_rx);
 
     enable_raw_mode().context("Failed to enable raw mode")?;
     let mut stdout = io::stdout();
@@ -112,9 +124,24 @@ fn run_loop<B: ratatui::backend::Backend>(
                     _ => {}
                 }
             }
+
+            // If the user confirmed the update in this tick, render the
+            // "Downloading…" overlay on the next frame, then perform the update.
+            if app.mode == Mode::Updating {
+                terminal.draw(|f| render(f, app))?;
+                app.perform_update();
+            }
         } else {
-            // Timeout: refresh phases.
+            // Timeout: refresh phases, and check if an update arrived.
             app.refresh_phases();
+            if app.mode == Mode::Normal {
+                if let Some(rx) = &app.update_rx {
+                    if let Ok(info) = rx.try_recv() {
+                        app.mode = Mode::UpdateAvailable(info);
+                        app.update_rx = None; // consumed
+                    }
+                }
+            }
         }
 
         if app.should_quit {

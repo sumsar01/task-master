@@ -408,6 +408,14 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
             t.text_style().fg(t.phase_error),
         ),
         Mode::ConfirmClose => (String::new(), t.text_dim_style()),
+        Mode::UpdateAvailable(_) => (
+            " Update available — press y to update, n to skip".to_string(),
+            t.text_style().fg(t.phase_done),
+        ),
+        Mode::Updating => (
+            " Downloading update… please wait".to_string(),
+            t.text_dim_style(),
+        ),
         Mode::Normal => {
             if let Some(msg) = app.current_status() {
                 (format!(" {}", msg), t.text_dim_style())

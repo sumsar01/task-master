@@ -31,8 +31,8 @@ theme = "tokyonight"
 name = "my-service"
 short = "SVC"
 repo = "projects/my-service"
-group = "Work"            # super-group shown in TUI
-context = "warehouse"     # bounded-context tag (for future filtering)
+group = "Whiteaway"                 # super-group shown in TUI
+context = "delivery-and-logistics"  # bounded-context tag (for future filtering)
 
   [[projects.worktrees]]
   name = "main"

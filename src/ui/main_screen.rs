@@ -72,6 +72,7 @@ fn render_header(f: &mut Frame, area: Rect, t: &Theme) {
         ("c", "close"),
         ("a", "attach"),
         ("v", "supervise"),
+        ("d", "detail"),
         ("w", "preview"),
         ("t", "theme"),
         ("?", "help"),
@@ -99,6 +100,10 @@ fn render_header(f: &mut Frame, area: Rect, t: &Theme) {
 /// height passed to `Constraint::Length` is ACTIONS_LINES + 2.
 const ACTIONS_LINES: u16 = 19;
 
+/// Fixed height of the detail pane when it shares the right column with
+/// another pane (preview).  Border adds 2, so actual block height = DETAIL_LINES + 2.
+const DETAIL_LINES: u16 = 10;
+
 fn render_content(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) {
     let (left_pct, right_pct) = if area.width >= SPLIT_THRESHOLD {
         (50, 50)
@@ -116,17 +121,48 @@ fn render_content(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) {
 
     render_worktree_list(f, cols[0], app, t);
 
-    if app.show_preview {
-        // Split the right column: Actions at natural height, preview fills rest.
-        let actions_height = (ACTIONS_LINES + 2).min(cols[1].height);
-        let right_rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(actions_height), Constraint::Min(0)])
-            .split(cols[1]);
-        render_actions(f, right_rows[0], app, t);
-        render_preview(f, right_rows[1], app, t);
-    } else {
-        render_actions(f, cols[1], app, t);
+    match (app.show_detail, app.show_preview) {
+        // ── Actions only ──────────────────────────────────────────────────────
+        (false, false) => {
+            render_actions(f, cols[1], app, t);
+        }
+        // ── Actions + Preview ─────────────────────────────────────────────────
+        (false, true) => {
+            let actions_height = (ACTIONS_LINES + 2).min(cols[1].height);
+            let right_rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(actions_height), Constraint::Min(0)])
+                .split(cols[1]);
+            render_actions(f, right_rows[0], app, t);
+            render_preview(f, right_rows[1], app, t);
+        }
+        // ── Actions + Detail ──────────────────────────────────────────────────
+        (true, false) => {
+            let actions_height = (ACTIONS_LINES + 2).min(cols[1].height);
+            let right_rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(actions_height), Constraint::Min(0)])
+                .split(cols[1]);
+            render_actions(f, right_rows[0], app, t);
+            render_detail(f, right_rows[1], app, t);
+        }
+        // ── Actions + Detail + Preview ────────────────────────────────────────
+        (true, true) => {
+            let actions_height = (ACTIONS_LINES + 2).min(cols[1].height);
+            let detail_height =
+                (DETAIL_LINES + 2).min(cols[1].height.saturating_sub(actions_height));
+            let right_rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(actions_height),
+                    Constraint::Length(detail_height),
+                    Constraint::Min(0),
+                ])
+                .split(cols[1]);
+            render_actions(f, right_rows[0], app, t);
+            render_detail(f, right_rows[1], app, t);
+            render_preview(f, right_rows[2], app, t);
+        }
     }
 }
 
@@ -272,6 +308,47 @@ fn action_line<'a>(
             Span::styled(label, t.text_style()),
         ])
     }
+}
+
+// ---------------------------------------------------------------------------
+// Worktree detail pane
+// ---------------------------------------------------------------------------
+
+fn render_detail(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
+    let title = match app.selected_worktree() {
+        Some(wt) => format!(" {} — detail ", wt.window_name),
+        None => " Detail ".to_string(),
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(t.border_style())
+        .title(Span::styled(title, t.title_style()));
+
+    if app.detail_lines.is_empty() {
+        let msg = Paragraph::new(Span::styled("  No detail available", t.text_dim_style()));
+        f.render_widget(msg.block(block), area);
+        return;
+    }
+
+    let lines: Vec<Line> = app
+        .detail_lines
+        .iter()
+        .map(|s| {
+            if s.starts_with("Branch:") || s.starts_with("Status:") || s.starts_with("Recent") {
+                Line::from(Span::styled(
+                    format!("  {}", s),
+                    t.text_style().add_modifier(Modifier::BOLD),
+                ))
+            } else if s.is_empty() {
+                Line::from("")
+            } else {
+                Line::from(Span::styled(format!("  {}", s), t.text_dim_style()))
+            }
+        })
+        .collect();
+
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 // ---------------------------------------------------------------------------

@@ -200,7 +200,8 @@ fn main() -> Result<()> {
                     &project,
                     &name,
                     branch.as_deref(),
-                ),
+                )
+                .map(|msg| println!("{}", msg)),
                 Commands::Qa {
                     worktree,
                     pr_number,

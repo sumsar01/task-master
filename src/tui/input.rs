@@ -5,6 +5,13 @@ use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use std::time::Duration;
 
+/// Keys arriving faster than this are treated as a paste burst (see `handle_normal`).
+const BURST_DETECTION_THRESHOLD: Duration = Duration::from_millis(10);
+
+/// Paste events within this window of a submit trigger are treated as literal
+/// text rather than a submit, to avoid submitting mid-paste.
+const PASTE_DEBOUNCE_THRESHOLD: Duration = Duration::from_millis(200);
+
 // ---------------------------------------------------------------------------
 // Burst detection
 // ---------------------------------------------------------------------------
@@ -111,7 +118,7 @@ fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()
     // because it contained fewer than 3 events).  In that case, suppress any
     // side-effecting single-character command so random letters in the pasted
     // text don't quit the app, open the theme picker, or trigger agent spawns.
-    let is_burst = app.last_key_at.elapsed() < Duration::from_millis(10);
+    let is_burst = app.last_key_at.elapsed() < BURST_DETECTION_THRESHOLD;
 
     match code {
         KeyCode::Char('q') | KeyCode::Char('Q') if !is_burst => {
@@ -305,7 +312,7 @@ pub fn handle_prompt(
             // inside a bracketed-paste burst — treat the newline as literal
             // text rather than a submit trigger.  200 ms is intentionally
             // generous to accommodate slow/batched terminals.
-            if app.last_paste_at.elapsed() < Duration::from_millis(200) {
+            if app.last_paste_at.elapsed() < PASTE_DEBOUNCE_THRESHOLD {
                 app.input_buf.insert(app.cursor_pos, '\n');
                 app.cursor_pos += 1;
             } else {

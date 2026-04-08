@@ -177,60 +177,61 @@ impl Registry {
     }
 }
 
-/// Update the `[ui] theme` key in the TOML config file without disturbing any
-/// other content.  Creates the `[ui]` table if it doesn't exist yet.
-pub fn write_theme(base_dir: &PathBuf, theme_id: &str) -> Result<()> {
+/// Read the config file, apply `mutate` to the parsed TOML document, and write
+/// it back.  The closure receives a `&mut DocumentMut` and returns `Result<()>`.
+///
+/// This helper eliminates the repeated read → parse → mutate → write pattern
+/// shared by `write_theme`, `write_collapsed`, and `write_group_collapsed`.
+fn with_config_doc<F>(base_dir: &PathBuf, mutate: F) -> Result<()>
+where
+    F: FnOnce(&mut DocumentMut) -> Result<()>,
+{
     let config_path = base_dir.join("task-master.toml");
     let contents = fs::read_to_string(&config_path)
         .with_context(|| format!("Failed to read config: {}", config_path.display()))?;
-
     let mut doc = contents
         .parse::<DocumentMut>()
         .context("Failed to parse task-master.toml")?;
-
-    // Ensure the [ui] table exists.
-    if doc.get("ui").is_none() {
-        doc["ui"] = toml_edit::table();
-    }
-    doc["ui"]["theme"] = toml_edit::value(theme_id);
-
+    mutate(&mut doc)?;
     fs::write(&config_path, doc.to_string())
         .with_context(|| format!("Failed to write config: {}", config_path.display()))?;
     Ok(())
+}
+
+/// Update the `[ui] theme` key in the TOML config file without disturbing any
+/// other content.  Creates the `[ui]` table if it doesn't exist yet.
+pub fn write_theme(base_dir: &PathBuf, theme_id: &str) -> Result<()> {
+    with_config_doc(base_dir, |doc| {
+        if doc.get("ui").is_none() {
+            doc["ui"] = toml_edit::table();
+        }
+        doc["ui"]["theme"] = toml_edit::value(theme_id);
+        Ok(())
+    })
 }
 
 /// Update the `collapsed` key for a specific project in the TOML config file
 /// without disturbing any other content.  If the project is not found the
 /// file is left unchanged and no error is returned.
 pub fn write_collapsed(base_dir: &PathBuf, project_name: &str, collapsed: bool) -> Result<()> {
-    let config_path = base_dir.join("task-master.toml");
-    let contents = fs::read_to_string(&config_path)
-        .with_context(|| format!("Failed to read config: {}", config_path.display()))?;
-
-    let mut doc = contents
-        .parse::<DocumentMut>()
-        .context("Failed to parse task-master.toml")?;
-
-    let projects = match doc["projects"].as_array_of_tables_mut() {
-        Some(p) => p,
-        None => return Ok(()),
-    };
-
-    for proj in projects.iter_mut() {
-        let matches = proj
-            .get("name")
-            .and_then(|v| v.as_str())
-            .map(|s| s == project_name)
-            .unwrap_or(false);
-        if matches {
-            proj["collapsed"] = toml_edit::value(collapsed);
-            break;
+    with_config_doc(base_dir, |doc| {
+        let projects = match doc["projects"].as_array_of_tables_mut() {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        for proj in projects.iter_mut() {
+            let matches = proj
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s == project_name)
+                .unwrap_or(false);
+            if matches {
+                proj["collapsed"] = toml_edit::value(collapsed);
+                break;
+            }
         }
-    }
-
-    fs::write(&config_path, doc.to_string())
-        .with_context(|| format!("Failed to write config: {}", config_path.display()))?;
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Update the `[group_states]` table in the TOML config to record whether a
@@ -243,23 +244,13 @@ pub fn write_collapsed(base_dir: &PathBuf, project_name: &str, collapsed: bool) 
 /// Personal = true
 /// ```
 pub fn write_group_collapsed(base_dir: &PathBuf, group_name: &str, collapsed: bool) -> Result<()> {
-    let config_path = base_dir.join("task-master.toml");
-    let contents = fs::read_to_string(&config_path)
-        .with_context(|| format!("Failed to read config: {}", config_path.display()))?;
-
-    let mut doc = contents
-        .parse::<DocumentMut>()
-        .context("Failed to parse task-master.toml")?;
-
-    // Ensure the [group_states] table exists.
-    if doc.get("group_states").is_none() {
-        doc["group_states"] = toml_edit::table();
-    }
-    doc["group_states"][group_name] = toml_edit::value(collapsed);
-
-    fs::write(&config_path, doc.to_string())
-        .with_context(|| format!("Failed to write config: {}", config_path.display()))?;
-    Ok(())
+    with_config_doc(base_dir, |doc| {
+        if doc.get("group_states").is_none() {
+            doc["group_states"] = toml_edit::table();
+        }
+        doc["group_states"][group_name] = toml_edit::value(collapsed);
+        Ok(())
+    })
 }
 
 /// Remove a `[[projects.worktrees]]` entry from the TOML document string.

@@ -3,6 +3,11 @@ use crate::registry::Registry;
 use crate::tmux;
 use anyhow::Result;
 
+/// How long to wait (ms) after spawning/killing a tmux window before
+/// re-selecting the TUI window. opencode's startup terminal takeover can
+/// trigger a tmux activity event that steals focus; this pause wins the race.
+const TMUX_REFOCUS_DELAY_MS: u64 = 250;
+
 // ---------------------------------------------------------------------------
 // Action execution
 // ---------------------------------------------------------------------------
@@ -26,13 +31,9 @@ pub fn execute_spawn(app: &mut App, registry: &Registry, force: bool) -> Result<
         Some(x) => x,
         None => return Ok(()),
     };
-    match crate::cmd_spawn(registry, &wt_name, &prompt, force) {
+    match crate::spawn::cmd_spawn(registry, &wt_name, &prompt, force) {
         Ok(_) => {
-            let _ = tmux::select_tui_window(&app.session, &app.tui_window_name);
-            // opencode startup in the new window can trigger a tmux activity event
-            // that steals focus. Re-select after a brief pause to win the race.
-            std::thread::sleep(std::time::Duration::from_millis(250));
-            let _ = tmux::select_tui_window(&app.session, &app.tui_window_name);
+            refocus_tui_window(&app.session, &app.tui_window_name);
             app.set_status(format!("Spawned {}:dev", wt_name));
             push_history(app, &prompt);
             app.reset_input();
@@ -62,11 +63,7 @@ pub fn execute_plan(app: &mut App, registry: &Registry) -> Result<()> {
     };
     match crate::plan::cmd_plan(registry, &wt_name, &prompt) {
         Ok(_) => {
-            let _ = tmux::select_tui_window(&app.session, &app.tui_window_name);
-            // opencode startup in the new window can trigger a tmux activity event
-            // that steals focus. Re-select after a brief pause to win the race.
-            std::thread::sleep(std::time::Duration::from_millis(250));
-            let _ = tmux::select_tui_window(&app.session, &app.tui_window_name);
+            refocus_tui_window(&app.session, &app.tui_window_name);
             app.set_status(format!("Plan agent started in {}:plan", wt_name));
             push_history(app, &prompt);
             app.reset_input();
@@ -94,12 +91,7 @@ pub fn execute_qa(app: &mut App, registry: &Registry) -> Result<()> {
     };
     match crate::qa::cmd_qa(registry, &wt_name, Some(pr_number)) {
         Ok(_) => {
-            let _ = tmux::select_tui_window(&app.session, &app.tui_window_name);
-            // The replaced window's opencode process exits (C-c) then a new one starts.
-            // Both events can trigger tmux focus switches. Re-select after a brief
-            // pause to win the race against opencode's startup terminal takeover.
-            std::thread::sleep(std::time::Duration::from_millis(250));
-            let _ = tmux::select_tui_window(&app.session, &app.tui_window_name);
+            refocus_tui_window(&app.session, &app.tui_window_name);
             app.set_status(format!(
                 "QA agent started for {} PR #{}",
                 wt_name, pr_number
@@ -125,14 +117,8 @@ pub fn execute_close(app: &mut App) -> Result<()> {
     match crate::cmd_close(&app.session, &wt_name) {
         Ok(()) => {
             // Reclaim focus after the kill-window call. Killing a tmux window
-            // can briefly steal focus away from the TUI window (tmux switches to
-            // an adjacent window), which corrupts the alternate-screen buffer
-            // and causes ratatui's incremental diff renderer to leave stale cells.
-            // The double-select + 250ms sleep is the same pattern used by
-            // execute_spawn / execute_plan / execute_qa (see lines above).
-            let _ = tmux::select_tui_window(&app.session, &app.tui_window_name);
-            std::thread::sleep(std::time::Duration::from_millis(250));
-            let _ = tmux::select_tui_window(&app.session, &app.tui_window_name);
+            // can briefly steal focus away from the TUI window.
+            refocus_tui_window(&app.session, &app.tui_window_name);
 
             app.mode = Mode::Normal;
             app.set_status(format!("Closed {}.", wt_name));
@@ -173,6 +159,17 @@ pub fn execute_send(app: &mut App, registry: &Registry) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Re-select the TUI window after a tmux operation that may have stolen focus.
+///
+/// Sends select-window twice with a brief sleep between them: the first
+/// call reclaims focus immediately; the sleep lets opencode's startup settle;
+/// the second call wins the race against any delayed tmux activity event.
+fn refocus_tui_window(session: &str, tui_window_name: &str) {
+    let _ = tmux::select_tui_window(session, tui_window_name);
+    std::thread::sleep(std::time::Duration::from_millis(TMUX_REFOCUS_DELAY_MS));
+    let _ = tmux::select_tui_window(session, tui_window_name);
 }
 
 pub fn push_history(app: &mut App, text: &str) {

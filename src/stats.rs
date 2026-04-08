@@ -60,8 +60,7 @@ pub fn fetch_stats(session_dir: &str, days: Option<u32>) -> Option<StatsRow> {
         now_ms - (d as i64 * 24 * 60 * 60 * 1000)
     });
 
-    let sql = if time_cutoff.is_some() {
-        "SELECT
+    let sql_base = "SELECT
             COUNT(DISTINCT s.id),
             COALESCE(SUM(CAST(json_extract(m.data, '$.tokens.input')  AS INTEGER)), 0),
             COALESCE(SUM(CAST(json_extract(m.data, '$.tokens.output') AS INTEGER)), 0),
@@ -69,30 +68,19 @@ pub fn fetch_stats(session_dir: &str, days: Option<u32>) -> Option<StatsRow> {
          FROM session s
          JOIN message m ON m.session_id = s.id
          WHERE s.directory = ?1
-           AND json_extract(m.data, '$.role') = 'assistant'
-           AND s.time_updated >= ?2"
-    } else {
-        "SELECT
-            COUNT(DISTINCT s.id),
-            COALESCE(SUM(CAST(json_extract(m.data, '$.tokens.input')  AS INTEGER)), 0),
-            COALESCE(SUM(CAST(json_extract(m.data, '$.tokens.output') AS INTEGER)), 0),
-            COALESCE(SUM(CAST(json_extract(m.data, '$.tokens.cache.read') AS INTEGER)), 0)
-         FROM session s
-         JOIN message m ON m.session_id = s.id
-         WHERE s.directory = ?1
-           AND json_extract(m.data, '$.role') = 'assistant'"
+           AND json_extract(m.data, '$.role') = 'assistant'";
+
+    let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(i64, i64, i64, i64)> {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
     };
 
     let result: Option<(i64, i64, i64, i64)> = if let Some(cutoff) = time_cutoff {
-        conn.query_row(sql, rusqlite::params![session_dir, cutoff], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-        })
-        .ok()
+        let sql = format!("{} AND s.time_updated >= ?2", sql_base);
+        conn.query_row(&sql, rusqlite::params![session_dir, cutoff], map_row)
+            .ok()
     } else {
-        conn.query_row(sql, rusqlite::params![session_dir], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-        })
-        .ok()
+        conn.query_row(sql_base, rusqlite::params![session_dir], map_row)
+            .ok()
     };
 
     let (sessions, input, output, cache_read) = result?;

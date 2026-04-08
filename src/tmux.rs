@@ -2,6 +2,14 @@ use anyhow::{bail, Context, Result};
 use std::process::Command;
 use tracing::debug;
 
+/// Settle delay after killing a tmux window before opening a new one in its place.
+/// Gives tmux time to process the kill and update its internal window list.
+const KILL_WINDOW_SETTLE_MS: u64 = 300;
+
+/// Minimum run of consecutive spaces that marks the start of the tmux sidebar
+/// column separator. The first 20 visible characters are skipped before scanning.
+const SIDEBAR_MIN_RUN_LEN: usize = 8;
+
 fn tmux(args: &[&str]) -> Result<String> {
     debug!("tmux {}", args.join(" "));
     let output = Command::new("tmux").args(args).output()?;
@@ -241,7 +249,7 @@ pub fn spawn_named_window_raw(
     if let Some(idx) = find_window_index(session, name) {
         let target = format!("{}:{}", session, idx);
         let _ = tmux(&["kill-window", "-t", &target]);
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::thread::sleep(std::time::Duration::from_millis(KILL_WINDOW_SETTLE_MS));
     }
 
     // Pass the command directly to new-window so tmux runs it via /bin/sh
@@ -353,7 +361,7 @@ fn strip_sidebar_column(line: &str) -> String {
                 run_start = Some(i);
             }
             run_len += 1;
-            if run_len >= 8 {
+            if run_len >= SIDEBAR_MIN_RUN_LEN {
                 let cut = search_start + run_start.unwrap();
                 return line[..cut].trim_end().to_string();
             }

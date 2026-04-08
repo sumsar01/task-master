@@ -233,6 +233,7 @@ pub fn execute_add_worktree(app: &mut App, registry: &Registry) -> Result<()> {
                     let new_count = new_reg.worktrees.len();
                     app.worktrees = new_reg.worktrees;
                     app.projects = new_reg.projects;
+                    app.group_collapsed = new_reg.group_states.clone();
                     app.phases.resize(new_count, "?".to_string());
                     app.rebuild_entries();
                 }

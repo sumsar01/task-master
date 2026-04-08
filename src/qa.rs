@@ -1,9 +1,16 @@
 use crate::registry::Registry;
+use crate::templates;
 use crate::tmux;
 use anyhow::{Context, Result};
+use std::path::Path;
 use tracing::info;
 
 /// Build the inline QA loop prompt passed to the opencode agent.
+///
+/// Tries to load a custom template from `<base_dir>/.opencode/agents/qa.md`
+/// first. If the file exists its body (with YAML frontmatter stripped) is used
+/// as the template with `{{token}}` placeholders substituted at runtime.
+/// Falls back to the built-in string constant when the file is absent.
 ///
 /// `session` and `dev_window` are injected so the agent can update the tmux
 /// window name to reflect its current phase without any external tooling.
@@ -11,6 +18,7 @@ use tracing::info;
 /// `default_branch` is the repo's default branch (e.g. "main" or "master"),
 /// used as the rebase target instead of hardcoding "master".
 pub fn build_qa_prompt(
+    base_dir: &Path,
     repo: &str,
     branch: &str,
     pr_number: u64,
@@ -26,6 +34,26 @@ pub fn build_qa_prompt(
 
     let handoff_rename = format!("{} '{base}:review'", rename_cmd, base = dev_window);
     let escalation_rename = format!("{} '{base}:blocked'", rename_cmd, base = dev_window);
+
+    let owner = repo.split('/').next().unwrap_or("").to_string();
+    let name = repo.split('/').nth(1).unwrap_or("").to_string();
+    let pr_str = pr_number.to_string();
+
+    let vars: &[(&str, &str)] = &[
+        ("pr", &pr_str),
+        ("branch", branch),
+        ("repo", repo),
+        ("owner", &owner),
+        ("name", &name),
+        ("default_branch", default_branch),
+        ("handoff_rename", &handoff_rename),
+        ("escalation_rename", &escalation_rename),
+    ];
+
+    if let Some(raw) = templates::load(base_dir, "qa") {
+        let body = templates::strip_frontmatter(&raw);
+        return templates::render(body, vars);
+    }
 
     // Bodies use real newlines so the heredoc in the agent's shell command
     // produces proper line breaks in the GitHub comment.
@@ -186,8 +214,8 @@ pub fn build_qa_prompt(
         pr = pr_number,
         branch = branch,
         repo = repo,
-        owner = repo.split('/').next().unwrap_or(""),
-        name = repo.split('/').nth(1).unwrap_or(""),
+        owner = owner,
+        name = name,
         default_branch = default_branch,
         handoff_rename = handoff_rename,
         escalation_rename = escalation_rename,
@@ -226,6 +254,7 @@ pub fn cmd_qa(registry: &Registry, worktree_name: &str, pr_number: Option<u64>) 
     let abs_path_str = worktree.abs_path.to_string_lossy().to_string();
 
     let prompt = build_qa_prompt(
+        &registry.base_dir,
         &repo_slug,
         &branch,
         pr_number,
@@ -399,6 +428,13 @@ pub fn detect_pr_number(branch: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    /// A path that never has a .opencode/agents/ directory, so all tests
+    /// exercise the built-in fallback string rather than any on-disk template.
+    fn no_template() -> &'static Path {
+        Path::new("/tmp/no-such-dir-for-qa-tests")
+    }
 
     #[test]
     fn test_parse_github_slug_https() {
@@ -432,6 +468,7 @@ mod tests {
     #[test]
     fn test_build_qa_prompt_contains_pr_number() {
         let prompt = build_qa_prompt(
+            no_template(),
             "acme/repo",
             "feature/foo",
             42,
@@ -477,6 +514,7 @@ mod tests {
     #[test]
     fn test_build_qa_prompt_contains_rename_commands() {
         let prompt = build_qa_prompt(
+            no_template(),
             "acme/repo",
             "feat/x",
             7,
@@ -495,13 +533,13 @@ mod tests {
 
     #[test]
     fn test_build_qa_prompt_correct_branch_rule() {
-        let prompt = build_qa_prompt("o/r", "my-branch", 1, "s", "W-w", "master");
+        let prompt = build_qa_prompt(no_template(), "o/r", "my-branch", 1, "s", "W-w", "master");
         assert!(prompt.contains("'my-branch'"));
     }
 
     #[test]
     fn test_build_qa_prompt_qa_window_naming_convention() {
-        let prompt = build_qa_prompt("o/r", "b", 99, "ses", "DEV-main", "master");
+        let prompt = build_qa_prompt(no_template(), "o/r", "b", 99, "ses", "DEV-main", "master");
         assert!(prompt.contains("DEV-main:review"));
         assert!(prompt.contains("DEV-main:blocked"));
         assert!(!prompt.contains("DEV-main-qa"));
@@ -509,7 +547,15 @@ mod tests {
 
     #[test]
     fn test_build_qa_prompt_contains_rebase_step() {
-        let prompt = build_qa_prompt("acme/repo", "feat/foo", 55, "s", "W-w", "master");
+        let prompt = build_qa_prompt(
+            no_template(),
+            "acme/repo",
+            "feat/foo",
+            55,
+            "s",
+            "W-w",
+            "master",
+        );
         assert!(prompt.contains("git fetch origin"));
         // Branch-agnostic check — just verify "origin/" is present
         assert!(prompt.contains("git rebase origin/"));
@@ -522,7 +568,15 @@ mod tests {
 
     #[test]
     fn test_build_qa_prompt_uses_provided_default_branch() {
-        let prompt = build_qa_prompt("acme/repo", "feat/foo", 55, "s", "W-w", "main");
+        let prompt = build_qa_prompt(
+            no_template(),
+            "acme/repo",
+            "feat/foo",
+            55,
+            "s",
+            "W-w",
+            "main",
+        );
         assert!(
             prompt.contains("origin/main"),
             "should use provided default branch 'main'"
@@ -535,7 +589,15 @@ mod tests {
 
     #[test]
     fn test_build_qa_prompt_contains_resolve_thread() {
-        let prompt = build_qa_prompt("acme/repo", "feat/foo", 55, "s", "W-w", "master");
+        let prompt = build_qa_prompt(
+            no_template(),
+            "acme/repo",
+            "feat/foo",
+            55,
+            "s",
+            "W-w",
+            "master",
+        );
         assert!(prompt.contains("resolveReviewThread"));
         assert!(prompt.contains("threadId"));
         assert!(prompt.contains("acme"));
@@ -578,7 +640,7 @@ mod tests {
 
     #[test]
     fn test_build_qa_prompt_comment_bodies_use_body_file() {
-        let prompt = build_qa_prompt("o/r", "b", 42, "s", "W-w", "main");
+        let prompt = build_qa_prompt(no_template(), "o/r", "b", 42, "s", "W-w", "main");
         assert!(
             prompt.contains("--body-file"),
             "prompt should instruct agent to use --body-file"
@@ -591,7 +653,7 @@ mod tests {
 
     #[test]
     fn test_build_qa_prompt_comment_bodies_have_real_newlines() {
-        let prompt = build_qa_prompt("o/r", "b", 42, "s", "W-w", "main");
+        let prompt = build_qa_prompt(no_template(), "o/r", "b", 42, "s", "W-w", "main");
         // The handoff body is embedded in the prompt; find the section after HANDOFF
         let handoff_section = prompt
             .split("HANDOFF")
@@ -613,7 +675,7 @@ mod tests {
 
     #[test]
     fn test_build_qa_prompt_contains_stale_check_detection() {
-        let prompt = build_qa_prompt("o/r", "b", 42, "s", "W-w", "main");
+        let prompt = build_qa_prompt(no_template(), "o/r", "b", 42, "s", "W-w", "main");
         assert!(
             prompt.contains("STALE CHECK DETECTION"),
             "prompt should contain stale check detection section"
@@ -630,7 +692,7 @@ mod tests {
 
     #[test]
     fn test_build_qa_prompt_circleci_fallback() {
-        let prompt = build_qa_prompt("o/r", "b", 42, "s", "W-w", "main");
+        let prompt = build_qa_prompt(no_template(), "o/r", "b", 42, "s", "W-w", "main");
         assert!(
             prompt.contains("gh run view") && prompt.contains("404"),
             "prompt should mention that gh run view can return 404 for non-GitHub-Actions CI"
@@ -643,7 +705,7 @@ mod tests {
 
     #[test]
     fn test_build_qa_prompt_minimum_3_iterations_before_escalation() {
-        let prompt = build_qa_prompt("o/r", "b", 42, "s", "W-w", "main");
+        let prompt = build_qa_prompt(no_template(), "o/r", "b", 42, "s", "W-w", "main");
         let escalation_section = prompt
             .split("ESCALATION (after 3 full iterations")
             .nth(1)

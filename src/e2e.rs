@@ -1,14 +1,22 @@
 use crate::qa::{detect_branch, detect_repo_slug};
 use crate::registry::Registry;
+use crate::templates;
 use crate::tmux;
 use anyhow::Result;
+use std::path::Path;
 use tracing::info;
 
 /// Build the inline e2e validation prompt passed to the opencode agent.
 ///
+/// Tries to load a custom template from `<base_dir>/.opencode/agents/e2e.md`
+/// first. If the file exists its body (with YAML frontmatter stripped) is used
+/// as the template with `{{token}}` placeholders substituted at runtime.
+/// Falls back to the built-in string constant when the file is absent.
+///
 /// The agent is told upfront that AWS SSO and kubectl are already configured —
 /// it auto-detects identity at runtime rather than requiring config.
 pub fn build_e2e_prompt(
+    base_dir: &Path,
     repo: &str,
     branch: &str,
     pr_number: u64,
@@ -19,6 +27,21 @@ pub fn build_e2e_prompt(
 
     let done_rename = format!("{} '{base}:e2e-done'", rename_cmd, base = base_name);
     let blocked_rename = format!("{} '{base}:e2e-blocked'", rename_cmd, base = base_name);
+
+    let pr_str = pr_number.to_string();
+
+    let vars: &[(&str, &str)] = &[
+        ("pr", &pr_str),
+        ("branch", branch),
+        ("repo", repo),
+        ("done_rename", &done_rename),
+        ("blocked_rename", &blocked_rename),
+    ];
+
+    if let Some(raw) = templates::load(base_dir, "e2e") {
+        let body = templates::strip_frontmatter(&raw);
+        return templates::render(body, vars);
+    }
 
     format!(
         "You are an e2e validation agent for PR #{pr} on branch '{branch}' in repo '{repo}'.\n\
@@ -168,7 +191,14 @@ pub fn cmd_e2e(registry: &Registry, worktree_name: &str, pr_number: u64) -> Resu
 
     let base_name = tmux::base_window_name(worktree_name).to_string();
 
-    let prompt = build_e2e_prompt(&repo_slug, &branch, pr_number, &session, &base_name);
+    let prompt = build_e2e_prompt(
+        &registry.base_dir,
+        &repo_slug,
+        &branch,
+        pr_number,
+        &session,
+        &base_name,
+    );
 
     info!(
         "[{}] Starting e2e validation for PR #{} in session '{}'",
@@ -192,9 +222,21 @@ pub fn cmd_e2e(registry: &Registry, worktree_name: &str, pr_number: u64) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    fn no_template() -> &'static Path {
+        Path::new("/tmp/no-such-dir-for-e2e-tests")
+    }
 
     fn make_prompt() -> String {
-        build_e2e_prompt("acme/repo", "feat/foo", 42, "mysession", "WIS-olive")
+        build_e2e_prompt(
+            no_template(),
+            "acme/repo",
+            "feat/foo",
+            42,
+            "mysession",
+            "WIS-olive",
+        )
     }
 
     #[test]
@@ -274,7 +316,7 @@ mod tests {
 
     #[test]
     fn test_prompt_window_naming_convention() {
-        let p = build_e2e_prompt("o/r", "b", 1, "s", "WIS-cedar");
+        let p = build_e2e_prompt(no_template(), "o/r", "b", 1, "s", "WIS-cedar");
         assert!(p.contains("WIS-cedar:e2e-done"));
         assert!(p.contains("WIS-cedar:e2e-blocked"));
         assert!(!p.contains("WIS-cedar:review"));

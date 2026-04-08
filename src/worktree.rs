@@ -108,47 +108,31 @@ pub fn reset_worktree_to_master(path: &Path, force: bool) -> Result<()> {
 // Beads project-level coordination helpers
 // ---------------------------------------------------------------------------
 
-/// Returns the path to the primary `.beads/` directory for the given project,
-/// by scanning the project's registered worktrees and returning the first one
-/// that has a `.beads/` directory with **no** `redirect` file inside it.
-///
-/// Returns `None` when no worktrees have been initialised yet.
-fn find_primary_beads_dir(registry: &Registry, project_short: &str) -> Option<PathBuf> {
-    registry
-        .worktrees
-        .iter()
-        .filter(|w| w.project_short.eq_ignore_ascii_case(project_short))
-        .map(|w| w.abs_path.join(".beads"))
-        .find(|beads| beads.is_dir() && !beads.join("redirect").exists())
-}
-
-/// Run `bd init` in `worktree_path` to create the primary `.beads/` database.
+/// Run `bd init` in `repo_path` (the bare repo directory) to create the
+/// canonical `.beads/` database for the project.
 ///
 /// Uses `--non-interactive` so the command never prompts.  The issue prefix is
 /// set to the project short name so issue IDs look like `TM-abc`.
-fn init_beads_primary(worktree_path: &Path, project_short: &str) -> Result<()> {
+///
+/// This is only called when `repo_path/.beads/` does not yet exist.
+fn init_beads_in_repo(repo_path: &Path, project_short: &str) -> Result<()> {
     info!(
         "Running: bd init --prefix {} --non-interactive in {}",
         project_short,
-        worktree_path.display()
+        repo_path.display()
     );
     let output = Command::new("bd")
         .args(["init", "--prefix", project_short, "--non-interactive"])
-        .current_dir(worktree_path)
+        .current_dir(repo_path)
         .output()
         .context("Failed to run bd init (is bd installed?)")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        // bd init exits non-zero when the database already exists and prints a
-        // helpful message.  Treat "already initialized" as a soft warning.
         let combined = format!("{}{}", stdout, stderr);
+        // bd init exits non-zero when already initialised — treat as a no-op.
         if combined.contains("already initialized") || combined.contains("already exists") {
-            eprintln!(
-                "Note: bd init in '{}' reported the database already exists; skipping.",
-                worktree_path.display()
-            );
             return Ok(());
         }
         bail!("bd init failed: {}", combined.trim());
@@ -156,37 +140,23 @@ fn init_beads_primary(worktree_path: &Path, project_short: &str) -> Result<()> {
     Ok(())
 }
 
-/// Write a `.beads/redirect` file in `secondary_path` pointing at `primary_beads`.
+/// Write a `.beads/redirect` file in `worktree_path` pointing at the bare
+/// repo's `.beads/` directory.
 ///
-/// The redirect path is computed as a relative path from `secondary_path` to
-/// `primary_beads` so the layout is portable if the project directory is moved.
-fn write_beads_redirect(secondary_path: &Path, primary_beads: &Path) -> Result<()> {
-    // Compute a relative path from the secondary worktree dir to the primary .beads/.
-    let rel = pathdiff::diff_paths(primary_beads, secondary_path).with_context(|| {
-        format!(
-            "Could not compute relative path from '{}' to '{}'",
-            secondary_path.display(),
-            primary_beads.display()
-        )
-    })?;
-
-    let beads_dir = secondary_path.join(".beads");
+/// Worktrees are always direct children of the bare repo directory, so the
+/// redirect path is always the fixed relative string `../.beads`.
+fn write_beads_redirect(worktree_path: &Path) -> Result<()> {
+    let beads_dir = worktree_path.join(".beads");
     std::fs::create_dir_all(&beads_dir)
         .with_context(|| format!("Failed to create directory '{}'", beads_dir.display()))?;
 
     let redirect_path = beads_dir.join("redirect");
-    let redirect_content = rel.to_string_lossy().to_string();
-    std::fs::write(&redirect_path, &redirect_content).with_context(|| {
-        format!(
-            "Failed to write redirect file '{}'",
-            redirect_path.display()
-        )
-    })?;
+    std::fs::write(&redirect_path, "../.beads")
+        .with_context(|| format!("Failed to write '{}'", redirect_path.display()))?;
 
     info!(
-        "Wrote .beads/redirect in '{}' -> '{}'",
-        secondary_path.display(),
-        redirect_content
+        "Wrote .beads/redirect in '{}' -> ../.beads",
+        worktree_path.display()
     );
     Ok(())
 }
@@ -277,30 +247,30 @@ pub fn cmd_add_worktree(
     }
 
     // Set up project-level beads coordination.
-    // If a primary .beads/ already exists in a sibling worktree, write a
-    // redirect file so the new worktree shares that database.
-    // If no primary exists yet, run bd init in the new worktree to create one.
-    match find_primary_beads_dir(registry, project_short) {
-        Some(primary_beads) => match write_beads_redirect(&worktree_path, &primary_beads) {
-            Ok(()) => eprintln!(
-                "Note: wrote .beads/redirect in '{}' → primary at '{}'",
-                worktree_path.display(),
-                primary_beads.display()
-            ),
-            Err(e) => eprintln!(
-                "Warning: could not write .beads/redirect for {}: {}. \
-                     Run `bd init` manually in the worktree to share issues.",
-                window_name, e
-            ),
-        },
-        None => match init_beads_primary(&worktree_path, project_short) {
+    // The bare repo (repo_path) is always the canonical .beads/ host.
+    // If repo_path/.beads/ doesn't exist yet, initialise it there.
+    // Then write a redirect in the new worktree pointing at ../.beads.
+    let repo_beads = repo_path.join(".beads");
+    if !repo_beads.is_dir() {
+        match init_beads_in_repo(&repo_path, project_short) {
             Ok(()) => {}
             Err(e) => eprintln!(
                 "Warning: could not run bd init for {}: {}. \
-                     Run `bd init --prefix {}` manually.",
-                window_name, e, project_short
+                 Run `bd init --prefix {}` manually in '{}'.",
+                window_name,
+                e,
+                project_short,
+                repo_path.display()
             ),
-        },
+        }
+    }
+    match write_beads_redirect(&worktree_path) {
+        Ok(()) => {}
+        Err(e) => eprintln!(
+            "Warning: could not write .beads/redirect for {}: {}. \
+             Run `bd init` manually in the worktree to share issues.",
+            window_name, e
+        ),
     }
 
     Ok(format!(
@@ -330,71 +300,6 @@ pub fn cmd_remove_worktree(
                  Stop the agent first, or pass --force to remove anyway.",
                 window_base
             );
-        }
-    }
-
-    // Check if this worktree is the primary beads host (has .beads/ but no redirect).
-    let this_beads = worktree.abs_path.join(".beads");
-    let is_primary = this_beads.is_dir() && !this_beads.join("redirect").exists();
-
-    // Collect sibling worktrees for this project (excluding the one being removed).
-    let siblings: Vec<PathBuf> = registry
-        .worktrees
-        .iter()
-        .filter(|w| {
-            w.project_short
-                .eq_ignore_ascii_case(&worktree.project_short)
-                && w.window_name != worktree.window_name
-        })
-        .map(|w| w.abs_path.clone())
-        .collect();
-
-    if is_primary && !siblings.is_empty() {
-        // Re-elect the new primary: pick the first sibling alphabetically for
-        // determinism.  We sort by window_name so the choice is predictable.
-        let mut sorted_siblings = siblings.clone();
-        sorted_siblings.sort();
-        let new_primary_wt = &sorted_siblings[0];
-        let new_primary_beads = new_primary_wt.join(".beads");
-
-        eprintln!(
-            "Note: removing primary beads worktree '{}'. \
-             Re-electing '{}' as new primary.",
-            window_base,
-            new_primary_wt.display()
-        );
-
-        // Copy the primary .beads/ to the new primary, excluding runtime files.
-        copy_beads_dir(&this_beads, &new_primary_beads).with_context(|| {
-            format!(
-                "Failed to copy .beads/ from '{}' to '{}'",
-                this_beads.display(),
-                new_primary_beads.display()
-            )
-        })?;
-
-        // Update redirect files in all other siblings to point at the new primary.
-        for sibling in &siblings {
-            if sibling == new_primary_wt {
-                // This is the new primary — remove any existing redirect file so it
-                // becomes a proper primary (no redirect).
-                let redirect = sibling.join(".beads").join("redirect");
-                if redirect.exists() {
-                    std::fs::remove_file(&redirect).with_context(|| {
-                        format!("Failed to remove redirect file '{}'", redirect.display())
-                    })?;
-                }
-            } else {
-                // Repoint other secondaries at the new primary.
-                match write_beads_redirect(sibling, &new_primary_beads) {
-                    Ok(()) => {}
-                    Err(e) => eprintln!(
-                        "Warning: could not update .beads/redirect in '{}': {}",
-                        sibling.display(),
-                        e
-                    ),
-                }
-            }
         }
     }
 
@@ -443,53 +348,6 @@ pub fn cmd_remove_worktree(
     std::fs::write(&config_path, new_toml)?;
 
     println!("Removed worktree '{}'.", window_base);
-    Ok(())
-}
-
-/// Copy a `.beads/` directory to a new location, skipping runtime-only files
-/// that should not be transferred (PID files, port files, locks, logs).
-fn copy_beads_dir(src: &Path, dst: &Path) -> Result<()> {
-    // Files that are runtime-only and must not be copied to the new primary.
-    const SKIP_FILES: &[&str] = &[
-        "dolt-server.pid",
-        "dolt-server.port",
-        "dolt-server.lock",
-        "dolt-server.log",
-        "dolt-server.activity",
-        "dolt-config.log",
-        // The redirect file from the old primary must not carry over.
-        "redirect",
-    ];
-
-    std::fs::create_dir_all(dst)
-        .with_context(|| format!("Failed to create '{}'", dst.display()))?;
-
-    for entry in
-        std::fs::read_dir(src).with_context(|| format!("Failed to read '{}'", src.display()))?
-    {
-        let entry = entry.with_context(|| format!("Failed to iterate '{}'", src.display()))?;
-        let file_name = entry.file_name();
-        let name_str = file_name.to_string_lossy();
-
-        if SKIP_FILES.iter().any(|skip| *skip == name_str.as_ref()) {
-            continue;
-        }
-
-        let src_path = entry.path();
-        let dst_path = dst.join(&file_name);
-
-        if src_path.is_dir() {
-            copy_beads_dir(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path).with_context(|| {
-                format!(
-                    "Failed to copy '{}' to '{}'",
-                    src_path.display(),
-                    dst_path.display()
-                )
-            })?;
-        }
-    }
     Ok(())
 }
 
@@ -834,134 +692,51 @@ repo = "projects/beta"
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_write_beads_redirect_creates_file_with_relative_path() {
+    fn test_write_beads_redirect_creates_file_with_correct_content() {
         let root = tempfile::tempdir().expect("tempdir");
-        let primary = root.path().join("oak").join(".beads");
-        let secondary = root.path().join("walnut");
-        std::fs::create_dir_all(&primary).unwrap();
-        std::fs::create_dir_all(&secondary).unwrap();
+        let worktree = root.path().join("walnut");
+        std::fs::create_dir_all(&worktree).unwrap();
 
-        write_beads_redirect(&secondary, &primary).unwrap();
+        write_beads_redirect(&worktree).unwrap();
 
-        let redirect_path = secondary.join(".beads").join("redirect");
+        let redirect_path = worktree.join(".beads").join("redirect");
         assert!(redirect_path.exists(), "redirect file should be created");
         let content = std::fs::read_to_string(&redirect_path).unwrap();
-        // Should be a relative path, not absolute.
-        assert!(
-            !content.starts_with('/'),
-            "redirect path should be relative, got: {}",
-            content
-        );
-        // Resolving the relative path from the secondary dir should give the primary.
-        let resolved = secondary.join(&content);
         assert_eq!(
-            resolved.canonicalize().unwrap(),
-            primary.canonicalize().unwrap(),
-            "resolved redirect path should point at primary .beads/"
+            content, "../.beads",
+            "redirect content must be exactly '../.beads', got: {}",
+            content
         );
     }
 
     #[test]
     fn test_write_beads_redirect_creates_dot_beads_dir_if_missing() {
         let root = tempfile::tempdir().expect("tempdir");
-        let primary = root.path().join("primary").join(".beads");
-        let secondary = root.path().join("secondary");
-        std::fs::create_dir_all(&primary).unwrap();
-        std::fs::create_dir_all(&secondary).unwrap();
-        // .beads/ does NOT exist in secondary yet — write_beads_redirect should create it.
-        assert!(!secondary.join(".beads").exists());
-        write_beads_redirect(&secondary, &primary).unwrap();
+        let worktree = root.path().join("secondary");
+        std::fs::create_dir_all(&worktree).unwrap();
+        // .beads/ does NOT exist yet — write_beads_redirect should create it.
+        assert!(!worktree.join(".beads").exists());
+        write_beads_redirect(&worktree).unwrap();
         assert!(
-            secondary.join(".beads").join("redirect").exists(),
+            worktree.join(".beads").join("redirect").exists(),
             ".beads/redirect must be created even when .beads/ was absent"
         );
     }
 
     #[test]
-    fn test_find_primary_beads_dir_returns_worktree_without_redirect() {
-        use crate::registry::Registry;
+    fn test_write_beads_redirect_is_idempotent() {
         let root = tempfile::tempdir().expect("tempdir");
+        let worktree = root.path().join("oak");
+        std::fs::create_dir_all(&worktree).unwrap();
 
-        // Set up a simple two-worktree layout on disk.
-        let oak_beads = root.path().join("projects/svc/oak/.beads");
-        let walnut_beads = root.path().join("projects/svc/walnut/.beads");
-        std::fs::create_dir_all(&oak_beads).unwrap();
-        std::fs::create_dir_all(&walnut_beads).unwrap();
-        // walnut has a redirect (it is secondary); oak does not (it is primary).
-        std::fs::write(walnut_beads.join("redirect"), "../oak/.beads").unwrap();
+        // Call twice — should not error or corrupt the file.
+        write_beads_redirect(&worktree).unwrap();
+        write_beads_redirect(&worktree).unwrap();
 
-        let toml = format!(
-            r#"
-[[projects]]
-name = "service"
-short = "SVC"
-repo = "projects/svc"
-
-[[projects.worktrees]]
-name = "oak"
-
-[[projects.worktrees]]
-name = "walnut"
-"#
-        );
-        let reg = Registry::load_from_str(&toml, root.path().to_path_buf()).unwrap();
-
-        let primary = find_primary_beads_dir(&reg, "SVC");
-        assert!(primary.is_some(), "should find a primary");
+        let content = std::fs::read_to_string(worktree.join(".beads").join("redirect")).unwrap();
         assert_eq!(
-            primary.unwrap(),
-            root.path().join("projects/svc/oak/.beads"),
-            "oak is the primary (no redirect)"
-        );
-    }
-
-    #[test]
-    fn test_find_primary_beads_dir_returns_none_when_no_beads_initialised() {
-        use crate::registry::Registry;
-        let root = tempfile::tempdir().expect("tempdir");
-
-        let toml = r#"
-[[projects]]
-name = "service"
-short = "SVC"
-repo = "projects/svc"
-
-[[projects.worktrees]]
-name = "oak"
-"#;
-        // No .beads/ directories exist on disk at all.
-        let reg = Registry::load_from_str(toml, root.path().to_path_buf()).unwrap();
-        assert!(
-            find_primary_beads_dir(&reg, "SVC").is_none(),
-            "should return None when no .beads/ exists"
-        );
-    }
-
-    #[test]
-    fn test_copy_beads_dir_skips_runtime_files() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let src = root.path().join("src_beads");
-        let dst = root.path().join("dst_beads");
-        std::fs::create_dir_all(&src).unwrap();
-
-        // Write a data file and a runtime file.
-        std::fs::write(src.join("metadata.json"), r#"{"project_id":"abc"}"#).unwrap();
-        std::fs::write(src.join("dolt-server.pid"), "12345").unwrap();
-        std::fs::write(src.join("redirect"), "../other/.beads").unwrap();
-
-        copy_beads_dir(&src, &dst).unwrap();
-
-        assert!(
-            dst.join("metadata.json").exists(),
-            "data file should be copied"
-        );
-        assert!(
-            !dst.join("dolt-server.pid").exists(),
-            "runtime PID file must be skipped"
-        );
-        assert!(
-            !dst.join("redirect").exists(),
-            "redirect file must be skipped (new primary has no redirect)"
+            content, "../.beads",
+            "content must still be '../.beads' after second call"
         );
     }
 }

@@ -114,7 +114,7 @@ pub fn cmd_add_worktree(
     project_short: &str,
     worktree_name: &str,
     branch: Option<&str>,
-) -> Result<()> {
+) -> Result<String> {
     let project = registry.find_project(project_short).with_context(|| {
         format!(
             "Project '{}' not found. Run `task-master list` to see available projects.",
@@ -149,15 +149,16 @@ pub fn cmd_add_worktree(
     // no branch = uses HEAD
 
     info!("Running: git -C {} worktree add ...", repo_path.display());
-    let status = Command::new("git")
+    let output = Command::new("git")
         .arg("-C")
         .arg(&repo_path)
         .args(&git_args)
-        .status()
+        .output()
         .context("Failed to run git worktree add")?;
 
-    if !status.success() {
-        bail!("git worktree add failed");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git worktree add failed: {}", stderr.trim());
     }
 
     // Append to task-master.toml
@@ -168,8 +169,8 @@ pub fn cmd_add_worktree(
         .context("Failed to update task-master.toml")?;
     std::fs::write(&config_path, new_toml)?;
 
-    println!(
-        "Added {}. Spawn with:\n  task-master spawn {} \"<prompt>\"",
+    info!(
+        "Added {}. Spawn with: task-master spawn {} \"<prompt>\"",
         window_name, window_name
     );
 
@@ -188,7 +189,10 @@ pub fn cmd_add_worktree(
         }
     }
 
-    Ok(())
+    Ok(format!(
+        "Added {}. Spawn with:\n  task-master spawn {} \"<prompt>\"",
+        window_name, window_name
+    ))
 }
 
 // ---------------------------------------------------------------------------

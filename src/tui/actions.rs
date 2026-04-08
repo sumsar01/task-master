@@ -226,7 +226,7 @@ pub fn execute_add_worktree(app: &mut App, registry: &Registry) -> Result<()> {
         &worktree_name,
         branch.as_deref(),
     ) {
-        Ok(()) => {
+        Ok(_msg) => {
             // Reload registry so the new worktree appears in the list.
             match crate::registry::Registry::load(registry.base_dir.clone()) {
                 Ok(new_reg) => {

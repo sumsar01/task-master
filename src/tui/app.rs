@@ -51,8 +51,6 @@ pub enum ActionKind {
     Plan,
     Qa,
     Send,
-    /// Add a new git worktree: prompt expects "<project-short> <name> [branch]"
-    AddWorktree,
 }
 
 #[derive(Debug, Clone, PartialEq)]

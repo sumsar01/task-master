@@ -295,11 +295,6 @@ fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()
             }
             app.mode = Mode::ConfirmClose;
         }
-        // ── Add worktree ──────────────────────────────────────────────────────
-        KeyCode::Char('N') if !is_burst => {
-            app.input_buf.clear();
-            app.mode = Mode::Prompt(ActionKind::AddWorktree);
-        }
         _ => {}
     }
     Ok(())

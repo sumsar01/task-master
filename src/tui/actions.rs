@@ -18,7 +18,6 @@ pub fn execute_action(
         ActionKind::Plan => execute_plan(app, registry),
         ActionKind::Qa => execute_qa(app, registry),
         ActionKind::Send => execute_send(app, registry),
-        ActionKind::AddWorktree => execute_add_worktree(app, registry),
     }
 }
 
@@ -197,66 +196,6 @@ pub fn collect_spawn_inputs(app: &mut App) -> Option<(String, String)> {
         return None;
     }
     Some((wt_name, prompt))
-}
-
-pub fn execute_add_worktree(app: &mut App, registry: &Registry) -> Result<()> {
-    // Input format: "<project-short> <worktree-name> [branch]"
-    let raw = app.input_buf.trim().to_string();
-    let mut parts = raw.splitn(3, ' ').map(str::trim).filter(|s| !s.is_empty());
-    let project_short = match parts.next() {
-        Some(p) => p.to_string(),
-        None => {
-            app.set_status("Usage: <project-short> <name> [branch]");
-            return Ok(());
-        }
-    };
-    let worktree_name = match parts.next() {
-        Some(n) => n.to_string(),
-        None => {
-            app.set_status("Usage: <project-short> <name> [branch]");
-            return Ok(());
-        }
-    };
-    let branch: Option<String> = parts.next().map(|s| s.to_string());
-
-    match crate::worktree::cmd_add_worktree(
-        registry,
-        &registry.base_dir,
-        &project_short,
-        &worktree_name,
-        branch.as_deref(),
-    ) {
-        Ok(_msg) => {
-            // Reload registry so the new worktree appears in the list.
-            match crate::registry::Registry::load(registry.base_dir.clone()) {
-                Ok(new_reg) => {
-                    let new_count = new_reg.worktrees.len();
-                    app.worktrees = new_reg.worktrees;
-                    app.projects = new_reg.projects;
-                    app.group_collapsed = new_reg.group_states.clone();
-                    app.phases.resize(new_count, "?".to_string());
-                    app.rebuild_entries();
-                }
-                Err(e) => {
-                    app.set_status(format!("Worktree added but reload failed: {}", e));
-                    app.reset_input();
-                    return Ok(());
-                }
-            }
-            app.set_status(format!(
-                "Added worktree {}-{}.",
-                project_short, worktree_name
-            ));
-            push_history(app, &raw);
-            app.reset_input();
-            app.refresh_phases();
-        }
-        Err(e) => {
-            app.set_status(format!("Add worktree failed: {}", e));
-            // Keep input so the user can fix it.
-        }
-    }
-    Ok(())
 }
 
 pub fn attach_to_window(session: &str, base_name: &str, full_name: &str) {

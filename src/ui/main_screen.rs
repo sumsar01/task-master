@@ -74,7 +74,6 @@ fn render_header(f: &mut Frame, area: Rect, t: &Theme) {
         ("v", "supervise"),
         ("d", "detail"),
         ("w", "preview"),
-        ("N", "add worktree"),
         ("t", "theme"),
         ("?", "help"),
         ("q", "quit"),
@@ -479,10 +478,6 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
         }
         Mode::Prompt(crate::tui::ActionKind::Send) => (
             " Send message…  Esc to cancel".to_string(),
-            t.text_dim_style(),
-        ),
-        Mode::Prompt(crate::tui::ActionKind::AddWorktree) => (
-            " Add worktree: <project-short> <name> [branch]  Esc to cancel".to_string(),
             t.text_dim_style(),
         ),
         Mode::ForceConfirm => (

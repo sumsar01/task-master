@@ -234,8 +234,17 @@ fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()
                 let name = wt.window_name.clone();
                 match crate::cmd_reset(&name) {
                     Ok(()) => {
+                        // tmux rename-window (issued inside cmd_reset) can briefly
+                        // steal focus away from the TUI window — same race as
+                        // kill-window in execute_close. Re-select twice with a short
+                        // pause to win the race, then force a full repaint so any
+                        // stale cells from the previous frame are cleared.
+                        let _ = crate::tmux::select_tui_window(&app.session, &app.tui_window_name);
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                        let _ = crate::tmux::select_tui_window(&app.session, &app.tui_window_name);
                         app.set_status(format!("Reset {} to idle.", name));
                         app.refresh_phases();
+                        app.needs_full_redraw = true;
                     }
                     Err(e) => app.set_status(format!("Reset failed: {}", e)),
                 }

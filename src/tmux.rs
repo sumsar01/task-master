@@ -330,11 +330,18 @@ fn launch_in_existing_window(target: &str, working_dir: &str, cmd: &str) -> Resu
 /// Strip the right-hand sidebar column that opencode renders in its two-column
 /// TUI layout. The sidebar is separated from the conversation by a long run of
 /// spaces. We find the first run of 8 or more consecutive spaces starting after
-/// byte position 20 (so short lines and leading indentation are left intact)
+/// the 20th *character* (so short lines and leading indentation are left intact)
 /// and truncate there, then trim any residual trailing whitespace.
 fn strip_sidebar_column(line: &str) -> String {
-    // Work in bytes; the separator is plain ASCII spaces so byte == char here.
-    let search_start = 20.min(line.len());
+    // Find the byte offset of the 20th character (or end-of-string if shorter).
+    // Using char_indices ensures we never slice mid-codepoint, which would panic
+    // when the line contains multi-byte characters (e.g. em-dashes, box-drawing
+    // chars) whose bytes straddle the 20-byte mark.
+    let search_start = line
+        .char_indices()
+        .nth(20)
+        .map(|(i, _)| i)
+        .unwrap_or(line.len());
     let tail = &line[search_start..];
 
     // Find 8+ consecutive spaces in the tail.
@@ -578,5 +585,67 @@ mod tests {
     fn test_build_opencode_cmd_with_build_agent() {
         let cmd = build_opencode_cmd("/tmp/task-master-prompt-3.txt", Some("build"));
         assert!(cmd.contains("--agent 'build'"), "got: {cmd}");
+    }
+
+    // -------------------------------------------------------------------------
+    // strip_sidebar_column — regression tests for UTF-8 char-boundary safety
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_strip_sidebar_column_ascii_no_gap() {
+        // Short ASCII line with no 8-space run — returned as-is (trimmed).
+        let result = strip_sidebar_column("hello world   ");
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_strip_sidebar_column_ascii_wide_gap() {
+        // ASCII line with 8+ spaces after column 20 — sidebar is stripped.
+        let line = "12345678901234567890abcde        sidebar";
+        let result = strip_sidebar_column(line);
+        // Cut happens at the run of spaces; trailing whitespace trimmed.
+        assert_eq!(result, "12345678901234567890abcde");
+    }
+
+    #[test]
+    fn test_strip_sidebar_column_multibyte_at_boundary_no_panic() {
+        // Em-dash is 3 bytes (U+2014, bytes: E2 80 94).
+        // Place it so its bytes straddle byte offset 20 (bytes 18,19,20).
+        // Before the fix this caused: 'byte index 20 is not a char boundary'.
+        // "123456789012345678" = 18 bytes, then "—" = 3 bytes (positions 18-20),
+        // then trailing content.
+        let line = "123456789012345678\u{2014}trailing content";
+        // Must not panic.
+        let result = strip_sidebar_column(line);
+        assert!(!result.is_empty());
+        // The em-dash is character 19 (0-indexed), so search starts *after* char 20.
+        // No 8-space run exists, so full line trimmed.
+        assert_eq!(result, "123456789012345678\u{2014}trailing content");
+    }
+
+    #[test]
+    fn test_strip_sidebar_column_multibyte_with_sidebar() {
+        // Line with multi-byte chars before column 20, and a sidebar gap after.
+        // 10 em-dashes = 10 chars (30 bytes), then spaces, then sidebar.
+        let line = "\u{2014}\u{2014}\u{2014}\u{2014}\u{2014}\u{2014}\u{2014}\u{2014}\u{2014}\u{2014}1234567890abcde         sidebar";
+        let result = strip_sidebar_column(line);
+        // Must not panic and must strip the sidebar.
+        assert!(
+            !result.contains("sidebar"),
+            "sidebar should be stripped, got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_strip_sidebar_column_short_line_no_panic() {
+        // Line shorter than 20 chars — search_start clamped to end, no panic.
+        let result = strip_sidebar_column("hi");
+        assert_eq!(result, "hi");
+    }
+
+    #[test]
+    fn test_strip_sidebar_column_empty_no_panic() {
+        let result = strip_sidebar_column("");
+        assert_eq!(result, "");
     }
 }

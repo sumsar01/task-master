@@ -166,7 +166,11 @@ pub fn execute_send(app: &mut App, registry: &Registry) -> Result<()> {
 /// Sends select-window twice with a brief sleep between them: the first
 /// call reclaims focus immediately; the sleep lets opencode's startup settle;
 /// the second call wins the race against any delayed tmux activity event.
-fn refocus_tui_window(session: &str, tui_window_name: &str) {
+///
+/// `pub(super)` so it can also be called from `input.rs` for keybindings
+/// (e.g. the supervisor 'v' handler) that invoke tmux operations directly
+/// rather than going through `execute_action`.
+pub(super) fn refocus_tui_window(session: &str, tui_window_name: &str) {
     let _ = tmux::select_tui_window(session, tui_window_name);
     std::thread::sleep(std::time::Duration::from_millis(TMUX_REFOCUS_DELAY_MS));
     let _ = tmux::select_tui_window(session, tui_window_name);

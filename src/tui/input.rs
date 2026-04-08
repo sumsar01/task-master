@@ -25,6 +25,16 @@ pub fn collect_char_burst(events: &[Event]) -> Option<String> {
     if events.len() < 3 {
         return None;
     }
+    // If the last event is Enter, don't absorb the burst — let it fall through
+    // so the Enter can still submit the prompt.  This means typing a short
+    // phrase and pressing Enter quickly won't get swallowed.
+    let last_is_enter = matches!(
+        events.last(),
+        Some(Event::Key(k)) if k.kind == KeyEventKind::Press && k.code == KeyCode::Enter
+    );
+    if last_is_enter {
+        return None;
+    }
     // Every event must be a printable Key(Char) or Key(Enter).  Any
     // modifier-bearing key (Ctrl, Alt) or non-char key aborts the burst.
     let mut buf = String::with_capacity(events.len());

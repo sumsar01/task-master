@@ -361,6 +361,144 @@ pub fn cmd_install_agent_configs(registry: &Registry, base_dir: &PathBuf) -> Res
 }
 
 // ---------------------------------------------------------------------------
+// Git identity helpers
+// ---------------------------------------------------------------------------
+
+/// Write `user.name` and `user.email` into a bare repo's git config.
+///
+/// This is the canonical place to set a per-project git identity — all linked
+/// worktrees inherit the bare repo's "local" config, so a single write here
+/// covers every worktree without needing per-worktree overrides.
+///
+/// The primary use-case is correcting identity when the project's worktrees are
+/// stored under a directory path that triggers an unintended `includeIf` rule in
+/// `~/.gitconfig` (e.g. whiteaway project worktrees stored under the sumsar01
+/// directory tree).
+///
+/// Both `name` and `email` must be `Some`; if either is `None` the function is
+/// a no-op (returns `Ok(())`).
+pub fn write_git_identity_to_repo(
+    repo_path: &Path,
+    name: Option<&str>,
+    email: Option<&str>,
+) -> Result<()> {
+    let (name, email) = match (name, email) {
+        (Some(n), Some(e)) => (n, e),
+        _ => return Ok(()),
+    };
+
+    let git_config = |key: &str, val: &str| -> Result<()> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["config", key, val])
+            .output()
+            .with_context(|| {
+                format!(
+                    "Failed to run: git -C {} config {} {}",
+                    repo_path.display(),
+                    key,
+                    val
+                )
+            })?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            bail!(
+                "git config {} failed in '{}': {}",
+                key,
+                repo_path.display(),
+                stderr.trim()
+            );
+        }
+        Ok(())
+    };
+
+    git_config("user.name", name)?;
+    git_config("user.email", email)?;
+
+    info!(
+        "Set git identity in '{}': name={}, email={}",
+        repo_path.display(),
+        name,
+        email
+    );
+    Ok(())
+}
+
+/// Apply the `git_name`/`git_email` identity overrides for every project in the
+/// registry that has them configured.
+///
+/// This is the one-shot repair for bare repos that were created before the
+/// per-project identity feature existed.  It is idempotent — running it multiple
+/// times produces the same result.
+///
+/// Returns a human-readable summary string.
+pub fn cmd_fix_git_identity(registry: &Registry, base_dir: &PathBuf) -> Result<String> {
+    let mut updated = 0usize;
+    let mut skipped = 0usize;
+    let mut missing = 0usize;
+
+    for proj in &registry.projects {
+        let name = proj.git_name.as_deref();
+        let email = proj.git_email.as_deref();
+
+        if name.is_none() && email.is_none() {
+            skipped += 1;
+            info!(
+                "Skipping '{}' — no git_name/git_email configured",
+                proj.short
+            );
+            continue;
+        }
+
+        let repo_path = base_dir.join(&proj.repo);
+        if !repo_path.exists() {
+            missing += 1;
+            eprintln!(
+                "Warning: bare repo for '{}' not found at '{}' — skipping.",
+                proj.short,
+                repo_path.display()
+            );
+            continue;
+        }
+
+        match write_git_identity_to_repo(&repo_path, name, email) {
+            Ok(()) => {
+                updated += 1;
+                println!(
+                    "  {} → name={}, email={}",
+                    proj.short,
+                    name.unwrap_or("(unchanged)"),
+                    email.unwrap_or("(unchanged)")
+                );
+            }
+            Err(e) => {
+                missing += 1;
+                eprintln!(
+                    "Warning: could not set git identity for '{}': {}",
+                    proj.short, e
+                );
+            }
+        }
+    }
+
+    Ok(format!(
+        "Git identity applied to {} project(s){skipped_note}{missing_note}.",
+        updated,
+        skipped_note = if skipped > 0 {
+            format!(" ({} had no identity configured, skipped)", skipped)
+        } else {
+            String::new()
+        },
+        missing_note = if missing > 0 {
+            format!(" ({} failed — see warnings above)", missing)
+        } else {
+            String::new()
+        }
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // add-worktree
 // ---------------------------------------------------------------------------
 
@@ -429,6 +567,23 @@ pub fn cmd_add_worktree(
         "Added {}. Spawn with: task-master spawn {} \"<prompt>\"",
         window_name, window_name
     );
+
+    // Apply per-project git identity override so agents commit with the correct
+    // user.name / user.email even when the worktree path triggers an unintended
+    // includeIf rule in ~/.gitconfig.
+    // We write to the bare repo config; all linked worktrees inherit it.
+    match write_git_identity_to_repo(
+        &repo_path,
+        project.git_name.as_deref(),
+        project.git_email.as_deref(),
+    ) {
+        Ok(()) => {}
+        Err(e) => eprintln!(
+            "Warning: could not set git identity for {}: {}. \
+             Run `task-master fix-git-identity` manually later.",
+            window_name, e
+        ),
+    }
 
     // Auto-install the QA post-push hook for the new worktree.
     // Pass the project short name (e.g. "WIS"), not the full window name —
@@ -994,9 +1149,18 @@ repo = "projects/beta"
         install_agent_configs(&src_dir, &dst_dir).unwrap();
 
         let agents_dst = dst_dir.join(".opencode").join("agents");
-        assert_eq!(std::fs::read_to_string(agents_dst.join("plan.md")).unwrap(), "plan content");
-        assert_eq!(std::fs::read_to_string(agents_dst.join("qa.md")).unwrap(), "qa content");
-        assert_eq!(std::fs::read_to_string(agents_dst.join("e2e.md")).unwrap(), "e2e content");
+        assert_eq!(
+            std::fs::read_to_string(agents_dst.join("plan.md")).unwrap(),
+            "plan content"
+        );
+        assert_eq!(
+            std::fs::read_to_string(agents_dst.join("qa.md")).unwrap(),
+            "qa content"
+        );
+        assert_eq!(
+            std::fs::read_to_string(agents_dst.join("e2e.md")).unwrap(),
+            "e2e content"
+        );
     }
 
     #[test]
@@ -1012,7 +1176,11 @@ repo = "projects/beta"
         std::fs::write(agents_src.join("plan.md"), "plan").unwrap();
         install_agent_configs(&src_dir, &dst_dir).unwrap();
 
-        assert!(dst_dir.join(".opencode").join("agents").join("plan.md").exists());
+        assert!(dst_dir
+            .join(".opencode")
+            .join("agents")
+            .join("plan.md")
+            .exists());
     }
 
     #[test]
@@ -1029,9 +1197,18 @@ repo = "projects/beta"
         install_agent_configs(&src_dir, &dst_dir).unwrap();
 
         let agents_dst = dst_dir.join(".opencode").join("agents");
-        assert!(agents_dst.join("plan.md").exists(), "plan.md should be copied");
-        assert!(!agents_dst.join("qa.md").exists(), "qa.md should be skipped");
-        assert!(!agents_dst.join("e2e.md").exists(), "e2e.md should be skipped");
+        assert!(
+            agents_dst.join("plan.md").exists(),
+            "plan.md should be copied"
+        );
+        assert!(
+            !agents_dst.join("qa.md").exists(),
+            "qa.md should be skipped"
+        );
+        assert!(
+            !agents_dst.join("e2e.md").exists(),
+            "e2e.md should be skipped"
+        );
     }
 
     #[test]
@@ -1224,5 +1401,139 @@ repo = "projects/beta"
             Ok(())
         };
         assert!(result.is_ok());
+    }
+
+    // -------------------------------------------------------------------------
+    // write_git_identity_to_repo
+    // -------------------------------------------------------------------------
+
+    /// Helper: create a minimal bare git repo at `path` (no history needed, just a
+    /// valid git directory so `git config` commands work).
+    fn make_bare_repo(path: &std::path::Path) {
+        Command::new("git")
+            .args(["init", "--bare"])
+            .arg(path)
+            .status()
+            .expect("git init --bare failed");
+    }
+
+    #[test]
+    fn test_write_git_identity_writes_name_and_email() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let bare = root.path().join("myrepo.git");
+        make_bare_repo(&bare);
+
+        write_git_identity_to_repo(&bare, Some("Alice"), Some("alice@example.com")).unwrap();
+
+        // Read back via git config.
+        let name = Command::new("git")
+            .args(["-C"])
+            .arg(&bare)
+            .args(["config", "user.name"])
+            .output()
+            .unwrap();
+        let email = Command::new("git")
+            .args(["-C"])
+            .arg(&bare)
+            .args(["config", "user.email"])
+            .output()
+            .unwrap();
+
+        assert_eq!(
+            String::from_utf8_lossy(&name.stdout).trim(),
+            "Alice",
+            "user.name should be Alice"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&email.stdout).trim(),
+            "alice@example.com",
+            "user.email should be alice@example.com"
+        );
+    }
+
+    #[test]
+    fn test_write_git_identity_noop_when_both_none() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let bare = root.path().join("noop.git");
+        make_bare_repo(&bare);
+
+        // Should not error and should not write anything into the local repo config.
+        write_git_identity_to_repo(&bare, None, None).unwrap();
+
+        // user.name must not be set in the LOCAL repo config (--local skips global fallback).
+        let out = Command::new("git")
+            .args(["-C"])
+            .arg(&bare)
+            .args(["config", "--local", "user.name"])
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "user.name should not be set locally when both are None"
+        );
+    }
+
+    #[test]
+    fn test_write_git_identity_noop_when_name_none() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let bare = root.path().join("partial.git");
+        make_bare_repo(&bare);
+
+        // Only email provided — function should be a no-op (both must be Some).
+        write_git_identity_to_repo(&bare, None, Some("bob@example.com")).unwrap();
+
+        let out = Command::new("git")
+            .args(["-C"])
+            .arg(&bare)
+            .args(["config", "--local", "user.email"])
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "user.email should not be set locally when name is None"
+        );
+    }
+
+    #[test]
+    fn test_write_git_identity_is_idempotent() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let bare = root.path().join("idem.git");
+        make_bare_repo(&bare);
+
+        write_git_identity_to_repo(&bare, Some("Carol"), Some("carol@example.com")).unwrap();
+        write_git_identity_to_repo(&bare, Some("Carol"), Some("carol@example.com")).unwrap();
+
+        let email = Command::new("git")
+            .args(["-C"])
+            .arg(&bare)
+            .args(["config", "user.email"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&email.stdout).trim(),
+            "carol@example.com"
+        );
+    }
+
+    #[test]
+    fn test_write_git_identity_overwrites_existing() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let bare = root.path().join("overwrite.git");
+        make_bare_repo(&bare);
+
+        write_git_identity_to_repo(&bare, Some("Old Name"), Some("old@example.com")).unwrap();
+        write_git_identity_to_repo(&bare, Some("New Name"), Some("new@example.com")).unwrap();
+
+        let name = Command::new("git")
+            .args(["-C"])
+            .arg(&bare)
+            .args(["config", "user.name"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&name.stdout).trim(),
+            "New Name",
+            "user.name should be overwritten"
+        );
     }
 }

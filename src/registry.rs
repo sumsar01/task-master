@@ -42,6 +42,17 @@ pub struct ProjectConfig {
     /// Used when auto-creating `.serena/project.yml` in new worktrees.
     #[serde(default = "default_language")]
     pub language: String,
+    /// Optional git `user.name` override for commits made in this project's worktrees.
+    ///
+    /// Useful when the worktrees live under a path that triggers a different `includeIf`
+    /// identity in `~/.gitconfig` than intended (e.g. whiteaway worktrees stored under
+    /// the sumsar01 directory tree).  When set, this value is written into the project's
+    /// bare-repo git config so all linked worktrees inherit it automatically.
+    #[serde(default)]
+    pub git_name: Option<String>,
+    /// Optional git `user.email` override — see `git_name` for details.
+    #[serde(default)]
+    pub git_email: Option<String>,
 }
 
 fn default_theme() -> String {

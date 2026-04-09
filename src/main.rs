@@ -135,6 +135,15 @@ enum Commands {
     },
     /// Open the interactive TUI dashboard
     Tui,
+    /// Apply per-project git identity overrides to all configured bare repos
+    ///
+    /// Reads the `git_name` and `git_email` fields from each [[projects]] entry in
+    /// task-master.toml and writes them into the corresponding bare repo's git config.
+    /// This ensures agents commit with the correct identity even when the worktree path
+    /// triggers an unintended includeIf rule in ~/.gitconfig.
+    ///
+    /// Safe to run multiple times — it is fully idempotent.
+    FixGitIdentity,
 }
 
 fn main() -> Result<()> {
@@ -236,6 +245,8 @@ fn main() -> Result<()> {
                     worktree::cmd_remove_worktree(&registry, &base_dir, &worktree, force)
                 }
                 Commands::Tui => tui::cmd_tui(&registry),
+                Commands::FixGitIdentity => worktree::cmd_fix_git_identity(&registry, &base_dir)
+                    .map(|msg| println!("{}", msg)),
                 Commands::AddProject { .. } => unreachable!(),
             }
         }

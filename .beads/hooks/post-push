@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-_BIN='/Users/rasmus/git/github.com/whiteaway/task-master/target/release/task-master'
+_BIN='/Users/rasmus/git/github.com/sumsar01/task-master/target/release/task-master'
 _SHORT="TM"
 
 # Derive the worktree leaf name from $GIT_DIR at runtime.

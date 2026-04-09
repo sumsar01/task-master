@@ -278,7 +278,10 @@ fn write_prompt_file(prompt: &str) -> Result<String> {
 ///
 /// The command uses `"$(cat <file>)"` so the shell reads the prompt at startup.
 fn build_opencode_cmd(prompt_file: &str, agent: Option<&str>) -> String {
-    let mut cmd = String::from("opencode");
+    // Prepend GIT_TERMINAL_PROMPT=0 so that any subprocess (e.g. uvx fetching
+    // the Serena MCP server from GitHub) never falls back to an interactive
+    // password prompt on /dev/tty, which would block the agent TUI.
+    let mut cmd = String::from("GIT_TERMINAL_PROMPT=0 opencode");
     if let Some(a) = agent {
         cmd.push_str(&format!(" --agent {}", shell_escape(a)));
     }
@@ -568,6 +571,11 @@ mod tests {
     fn test_build_opencode_cmd_no_agent() {
         // build_opencode_cmd now takes a prompt *file path*, not the raw prompt.
         let cmd = build_opencode_cmd("/tmp/task-master-prompt-1.txt", None);
+        // Must suppress interactive git prompts from subprocesses (e.g. uvx/serena MCP).
+        assert!(
+            cmd.starts_with("GIT_TERMINAL_PROMPT=0 opencode"),
+            "got: {cmd}"
+        );
         assert!(
             cmd.contains("--prompt \"$(cat '/tmp/task-master-prompt-1.txt')\""),
             "got: {cmd}"
@@ -578,6 +586,10 @@ mod tests {
     #[test]
     fn test_build_opencode_cmd_with_agent() {
         let cmd = build_opencode_cmd("/tmp/task-master-prompt-2.txt", Some("plan"));
+        assert!(
+            cmd.starts_with("GIT_TERMINAL_PROMPT=0 opencode"),
+            "got: {cmd}"
+        );
         assert!(cmd.contains("--agent 'plan'"), "got: {cmd}");
         assert!(
             cmd.contains("--prompt \"$(cat '/tmp/task-master-prompt-2.txt')\""),
@@ -592,7 +604,28 @@ mod tests {
     #[test]
     fn test_build_opencode_cmd_with_build_agent() {
         let cmd = build_opencode_cmd("/tmp/task-master-prompt-3.txt", Some("build"));
+        assert!(
+            cmd.starts_with("GIT_TERMINAL_PROMPT=0 opencode"),
+            "got: {cmd}"
+        );
         assert!(cmd.contains("--agent 'build'"), "got: {cmd}");
+    }
+
+    #[test]
+    fn test_build_opencode_cmd_git_terminal_prompt_suppressed() {
+        // All variants must set GIT_TERMINAL_PROMPT=0 to prevent uvx/git from
+        // writing an interactive password prompt to /dev/tty inside the agent TUI.
+        for (file, agent) in [
+            ("/tmp/p1.txt", None),
+            ("/tmp/p2.txt", Some("plan")),
+            ("/tmp/p3.txt", Some("qa")),
+        ] {
+            let cmd = build_opencode_cmd(file, agent);
+            assert!(
+                cmd.starts_with("GIT_TERMINAL_PROMPT=0 opencode"),
+                "Missing GIT_TERMINAL_PROMPT=0 for agent={agent:?}: got: {cmd}"
+            );
+        }
     }
 
     // -------------------------------------------------------------------------

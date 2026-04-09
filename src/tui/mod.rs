@@ -25,13 +25,14 @@ pub fn cmd_tui(registry: &Registry) -> Result<()> {
     let session = tmux::current_session()
         .context("task-master tui must be run from within a tmux session")?;
 
-    // Capture the current window name so we can refocus it after spawning
-    // other windows (e.g. via 's', 'p', 'x' keybindings). We store the name
-    // rather than the numeric index because tmux renumbers indices whenever
-    // windows are created/destroyed, making a cached index stale.
-    let tui_window_name = tmux::current_window_name().unwrap_or_else(|_| "task-master".to_string());
+    // Capture the stable window ID (@N) for re-focusing after spawning other
+    // windows. Unlike the name or index, the ID never changes for the lifetime
+    // of the window — it is immune to renames (which could collide with a
+    // worktree base name) and to index renumbering (which happens whenever any
+    // window is created or destroyed).
+    let tui_window_id = tmux::current_window_id().unwrap_or_else(|_| String::new());
 
-    let mut app = App::new(registry, session.clone(), tui_window_name);
+    let mut app = App::new(registry, session.clone(), tui_window_id);
     app.refresh_phases();
     app.load_stats_for_selected();
 

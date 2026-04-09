@@ -33,7 +33,7 @@ pub fn execute_spawn(app: &mut App, registry: &Registry, force: bool) -> Result<
     };
     match crate::spawn::cmd_spawn(registry, &wt_name, &prompt, force) {
         Ok(_) => {
-            refocus_tui_window(&app.session, &app.tui_window_name);
+            refocus_tui_window(&app.session, &app.tui_window_id);
             app.set_status(format!("Spawned {}:dev", wt_name));
             push_history(app, &prompt);
             app.reset_input();
@@ -63,7 +63,7 @@ pub fn execute_plan(app: &mut App, registry: &Registry) -> Result<()> {
     };
     match crate::plan::cmd_plan(registry, &wt_name, &prompt) {
         Ok(_) => {
-            refocus_tui_window(&app.session, &app.tui_window_name);
+            refocus_tui_window(&app.session, &app.tui_window_id);
             app.set_status(format!("Plan agent started in {}:plan", wt_name));
             push_history(app, &prompt);
             app.reset_input();
@@ -91,7 +91,7 @@ pub fn execute_qa(app: &mut App, registry: &Registry) -> Result<()> {
     };
     match crate::qa::cmd_qa(registry, &wt_name, Some(pr_number)) {
         Ok(_) => {
-            refocus_tui_window(&app.session, &app.tui_window_name);
+            refocus_tui_window(&app.session, &app.tui_window_id);
             app.set_status(format!(
                 "QA agent started for {} PR #{}",
                 wt_name, pr_number
@@ -118,7 +118,7 @@ pub fn execute_close(app: &mut App) -> Result<()> {
         Ok(()) => {
             // Reclaim focus after the kill-window call. Killing a tmux window
             // can briefly steal focus away from the TUI window.
-            refocus_tui_window(&app.session, &app.tui_window_name);
+            refocus_tui_window(&app.session, &app.tui_window_id);
 
             app.mode = Mode::Normal;
             app.set_status(format!("Closed {}.", wt_name));
@@ -147,7 +147,7 @@ pub fn execute_send(app: &mut App, registry: &Registry) -> Result<()> {
     }
     match crate::cmd_send(registry, &wt_name, &prompt) {
         Ok(()) => {
-            let _ = tmux::select_tui_window(&app.session, &app.tui_window_name);
+            let _ = tmux::select_window_by_id(&app.session, &app.tui_window_id);
             app.set_status(format!("Sent message to {}.", wt_name));
             push_history(app, &prompt);
             app.reset_input();
@@ -163,17 +163,17 @@ pub fn execute_send(app: &mut App, registry: &Registry) -> Result<()> {
 
 /// Re-select the TUI window after a tmux operation that may have stolen focus.
 ///
+/// Uses the stable `#{window_id}` (@N) rather than the window name, so that a
+/// worktree whose base name collides with the TUI window's name can never cause
+/// the wrong window to be selected.
+///
 /// Sends select-window twice with a brief sleep between them: the first
 /// call reclaims focus immediately; the sleep lets opencode's startup settle;
 /// the second call wins the race against any delayed tmux activity event.
-///
-/// `pub(super)` so it can also be called from `input.rs` for keybindings
-/// (e.g. the supervisor 'v' handler) that invoke tmux operations directly
-/// rather than going through `execute_action`.
-pub(super) fn refocus_tui_window(session: &str, tui_window_name: &str) {
-    let _ = tmux::select_tui_window(session, tui_window_name);
+fn refocus_tui_window(session: &str, tui_window_id: &str) {
+    let _ = tmux::select_window_by_id(session, tui_window_id);
     std::thread::sleep(std::time::Duration::from_millis(TMUX_REFOCUS_DELAY_MS));
-    let _ = tmux::select_tui_window(session, tui_window_name);
+    let _ = tmux::select_window_by_id(session, tui_window_id);
 }
 
 pub fn push_history(app: &mut App, text: &str) {

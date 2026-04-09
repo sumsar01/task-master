@@ -272,9 +272,9 @@ fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()
                         // kill-window in execute_close. Re-select twice with a short
                         // pause to win the race, then force a full repaint so any
                         // stale cells from the previous frame are cleared.
-                        let _ = crate::tmux::select_tui_window(&app.session, &app.tui_window_name);
+                        let _ = crate::tmux::select_window_by_id(&app.session, &app.tui_window_id);
                         std::thread::sleep(std::time::Duration::from_millis(250));
-                        let _ = crate::tmux::select_tui_window(&app.session, &app.tui_window_name);
+                        let _ = crate::tmux::select_window_by_id(&app.session, &app.tui_window_id);
                         app.set_status(format!("Reset {} to idle.", name));
                         app.refresh_phases();
                         app.needs_full_redraw = true;
@@ -303,9 +303,9 @@ fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()
                 // the TUI, and leaves the terminal state stale enough for
                 // ratatui's incremental diff to miss cells. Mirror the pattern
                 // used by every other tmux-window-opening action:
-                //   1. Double-refocus with a settle sleep (wins the race).
+                //   1. Refocus with the stable window ID (immune to name collisions).
                 //   2. needs_full_redraw so the next frame calls terminal.clear().
-                super::actions::refocus_tui_window(&app.session, &app.tui_window_name);
+                let _ = crate::tmux::select_window_by_id(&app.session, &app.tui_window_id);
                 app.set_status("Supervisor started in 'supervisor' window.".to_string());
                 app.refresh_phases();
                 app.needs_full_redraw = true;

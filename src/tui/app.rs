@@ -86,10 +86,15 @@ pub struct App {
     /// Transient status message and when it was set.
     pub status_msg: Option<(String, Instant)>,
     pub session: String,
-    /// The tmux window name where the TUI is running (used to refocus after spawning).
-    /// Stored as a name rather than a numeric index because tmux renumbers indices
-    /// whenever windows are created or destroyed, making a cached index stale.
-    pub tui_window_name: String,
+    /// The stable tmux window ID (e.g. `@3`) for the window running the TUI.
+    ///
+    /// This ID is assigned once at window creation and never changes, even when
+    /// the window is renamed or other windows shift its numeric index. It is used
+    /// by `select_window_by_id` to reliably re-focus the TUI after spawning or
+    /// resetting worktree windows, avoiding the name-collision bug where a
+    /// worktree whose base name equals the TUI window name would cause
+    /// `find_window_index` to return the wrong window.
+    pub tui_window_id: String,
     pub should_quit: bool,
     /// Track which index was active when we last loaded stats.
     pub last_stats_idx: Option<usize>,
@@ -151,7 +156,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(registry: &Registry, session: String, tui_window_name: String) -> Self {
+    pub fn new(registry: &Registry, session: String, tui_window_id: String) -> Self {
         let worktrees = registry.worktrees.clone();
         let projects = registry.projects.clone();
         let count = worktrees.len();
@@ -186,7 +191,7 @@ impl App {
             stats_cache: HashMap::new(),
             status_msg: None,
             session,
-            tui_window_name,
+            tui_window_id,
             should_quit: false,
             last_stats_idx: None,
             theme,

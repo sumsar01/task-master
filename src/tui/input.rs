@@ -272,9 +272,9 @@ fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()
                         // kill-window in execute_close. Re-select twice with a short
                         // pause to win the race, then force a full repaint so any
                         // stale cells from the previous frame are cleared.
-                        let _ = crate::tmux::select_tui_window(&app.session, &app.tui_window_name);
+                        let _ = crate::tmux::select_window_by_id(&app.session, &app.tui_window_id);
                         std::thread::sleep(std::time::Duration::from_millis(250));
-                        let _ = crate::tmux::select_tui_window(&app.session, &app.tui_window_name);
+                        let _ = crate::tmux::select_window_by_id(&app.session, &app.tui_window_id);
                         app.set_status(format!("Reset {} to idle.", name));
                         app.refresh_phases();
                         app.needs_full_redraw = true;
@@ -299,7 +299,7 @@ fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()
         }
         KeyCode::Char('v') if !is_burst => match crate::supervise::cmd_supervise(registry) {
             Ok(()) => {
-                let _ = crate::tmux::select_tui_window(&app.session, &app.tui_window_name);
+                let _ = crate::tmux::select_window_by_id(&app.session, &app.tui_window_id);
                 app.set_status("Supervisor started in 'supervisor' window.".to_string());
                 app.refresh_phases();
             }

@@ -63,30 +63,30 @@ pub fn find_window_index(session: &str, base_name: &str) -> Option<String> {
     None
 }
 
-/// Return the name of the current tmux window, or error if not inside tmux.
-pub fn current_window_name() -> Result<String> {
-    tmux(&["display-message", "-p", "#W"]).context("Failed to get current tmux window name")
+/// Return the stable ID of the current tmux window (e.g. `@3`).
+///
+/// Unlike the window index (`#I`) or name (`#W`), the window ID is assigned
+/// once at creation and never changes — it survives renames, moves between
+/// sessions, and index renumbering caused by other windows being
+/// created/destroyed. Use this to reliably re-select the TUI window even after
+/// worktree windows have been renamed.
+pub fn current_window_id() -> Result<String> {
+    tmux(&["display-message", "-p", "#{window_id}"]).context("Failed to get current tmux window ID")
 }
 
-/// Re-select the TUI window (identified by name) so that spawning a new worktree
-/// window (which uses `new-window -d`) doesn't inadvertently steal focus on
-/// some tmux builds/configs.
+/// Re-select the TUI window by its stable `#{window_id}` (e.g. `@3`).
 ///
-/// Uses a dynamic name lookup instead of a cached numeric index, because tmux
-/// renumbers window indices whenever windows are created or destroyed, making a
-/// stale index silently point at the wrong window (or nowhere).
-pub fn select_tui_window(session: &str, window_name: &str) -> Result<()> {
-    let idx = find_window_index(session, window_name).with_context(|| {
-        format!(
-            "TUI window '{}' not found in session '{}'",
-            window_name, session
-        )
-    })?;
-    let target = format!("{}:{}", session, idx);
+/// Targeting by ID is immune to both name collisions (where a worktree's base
+/// name matches the TUI window name and `find_window_index` would return the
+/// wrong window) and to index staleness (indices shift whenever windows are
+/// created or destroyed).
+pub fn select_window_by_id(session: &str, window_id: &str) -> Result<()> {
+    // tmux accepts @N IDs directly as window targets: "session:@N"
+    let target = format!("{}:{}", session, window_id);
     tmux(&["select-window", "-t", &target]).with_context(|| {
         format!(
-            "Failed to re-focus TUI window '{}' (index {}) in session '{}'",
-            window_name, idx, session
+            "Failed to re-focus window '{}' (id {}) in session '{}'",
+            window_id, window_id, session
         )
     })?;
     Ok(())

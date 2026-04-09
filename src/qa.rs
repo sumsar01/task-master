@@ -301,11 +301,22 @@ pub fn detect_repo_slug(worktree_dir: &str) -> Result<String> {
         .with_context(|| format!("Could not parse GitHub slug from remote URL: {}", url))
 }
 
-/// Parse owner/repo from various GitHub URL formats:
-///   https://github.com/owner/repo.git
-///   git@github.com:owner/repo.git
 fn parse_github_slug(url: &str) -> Option<String> {
     let url = url.trim_end_matches(".git");
+
+    // Normalise credential-embedded HTTPS URLs:
+    // https://user:token@github.com/owner/repo  ->  https://github.com/owner/repo
+    let stripped;
+    let url = if url.starts_with("https://") {
+        if let Some(at_pos) = url.find('@') {
+            stripped = format!("https://{}", &url[at_pos + 1..]);
+            stripped.as_str()
+        } else {
+            url
+        }
+    } else {
+        url
+    };
 
     // HTTPS: https://github.com/owner/repo
     if let Some(rest) = url.strip_prefix("https://github.com/") {
@@ -509,6 +520,27 @@ mod tests {
     #[test]
     fn test_parse_github_slug_non_github_ssh() {
         assert_eq!(parse_github_slug("git@gitlab.com:owner/repo.git"), None);
+    }
+
+    #[test]
+    fn test_parse_github_slug_with_embedded_credentials() {
+        // Regression: PAT token embedded in remote URL (the form git uses when
+        // credentials are stored inline, e.g. via a credential helper or
+        // `git remote set-url origin https://user:token@github.com/…`)
+        assert_eq!(
+            parse_github_slug(
+                "https://skrwhiteaway:gho_TOKEN@github.com/whiteaway/fulfillment-service"
+            ),
+            Some("whiteaway/fulfillment-service".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_github_slug_with_embedded_credentials_dot_git() {
+        assert_eq!(
+            parse_github_slug("https://user:token@github.com/owner/repo.git"),
+            Some("owner/repo".to_string())
+        );
     }
 
     #[test]

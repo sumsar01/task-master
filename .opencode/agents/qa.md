@@ -1,7 +1,7 @@
 ---
 description: QA agent — iterates on a PR until CI is green and review comments are resolved
 mode: primary
-model: github-copilot/claude-sonnet-4-5
+model: github-copilot/claude-sonnet-4.6
 temperature: 0.2
 permission:
   edit:

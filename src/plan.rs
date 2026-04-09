@@ -1,37 +1,28 @@
 use crate::registry::Registry;
-use crate::templates;
 use crate::tmux;
 use anyhow::Result;
 use std::path::Path;
 use tracing::info;
 
-/// Build the inline planning prompt passed to the opencode agent.
+/// Build the inline planning prompt passed to the opencode agent via `--prompt`.
 ///
-/// Tries to load a custom template from `<base_dir>/.opencode/agents/plan.md`
-/// first. If the file exists its body (with YAML frontmatter stripped) is used
-/// as the template with `{{token}}` placeholders substituted at runtime.
-/// Falls back to the built-in string constant when the file is absent.
+/// The `.opencode/agents/plan.md` file (present in each target worktree) provides
+/// the agent's *system prompt* and metadata (model, permissions, mode) — opencode
+/// reads that file directly when started with `--agent plan`.  That file must NOT
+/// contain task-specific placeholders because opencode uses it verbatim.
 ///
-/// The agent is instructed to:
-///   1. Explore the codebase and understand the existing architecture.
-///   2. Ask clarifying questions using opencode's native question tool.
-///   3. Decompose the task into concrete beads issues (`bd create`, `bd dep add`).
-///   4. Rename the window to `:ready` when done.
+/// This function builds the *user prompt* (`--prompt` argument) that carries the
+/// actual task description and all phase-by-phase instructions.  It is always
+/// rendered inline from the built-in string so there is no ambiguity between the
+/// agent system-prompt file and the per-invocation task content.
 ///
 /// `session` and `window_base` are injected so the agent can rename its own
 /// tmux window without any external tooling, using the same awk-based pattern
 /// as the QA agent.
-pub fn build_plan_prompt(base_dir: &Path, task: &str, session: &str, window_base: &str) -> String {
+pub fn build_plan_prompt(_base_dir: &Path, task: &str, session: &str, window_base: &str) -> String {
     // Awk-based rename command that avoids colon-in-target tmux ambiguity.
     let rename_cmd = tmux::build_rename_cmd(session, window_base);
     let ready_rename = format!("{} '{base}:ready'", rename_cmd, base = window_base);
-
-    let vars: &[(&str, &str)] = &[("task", task), ("ready_rename", &ready_rename)];
-
-    if let Some(raw) = templates::load(base_dir, "plan") {
-        let body = templates::strip_frontmatter(&raw);
-        return templates::render(body, vars);
-    }
 
     format!(
         "You are a planning agent. Your ONLY job is to analyse the codebase, ask any \

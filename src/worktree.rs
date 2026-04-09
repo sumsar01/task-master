@@ -267,6 +267,100 @@ pub fn register_in_serena_config(worktree_path: &Path) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Agent config installation
+// ---------------------------------------------------------------------------
+
+/// Copy `plan.md`, `qa.md`, and `e2e.md` from the task-master project's
+/// `.opencode/agents/` directory into `<worktree_path>/.opencode/agents/`.
+///
+/// These files are the opencode agent configurations consumed by
+/// `opencode --agent plan/qa/e2e` when running inside the target worktree.
+/// They must be present in the *worktree's own directory* because opencode
+/// looks for agent configs relative to its current working directory, not
+/// relative to the task-master project root.
+///
+/// `base_dir` is the task-master project root (source of agent configs).
+/// `worktree_path` is the target worktree directory (destination).
+///
+/// Only files that actually exist in `base_dir/.opencode/agents/` are
+/// copied — missing source files are silently skipped.
+/// Existing destination files are always overwritten so updates propagate.
+pub fn install_agent_configs(base_dir: &Path, worktree_path: &Path) -> Result<()> {
+    let src_agents_dir = base_dir.join(".opencode").join("agents");
+    let dst_agents_dir = worktree_path.join(".opencode").join("agents");
+
+    std::fs::create_dir_all(&dst_agents_dir).with_context(|| {
+        format!(
+            "Failed to create agent config directory '{}'",
+            dst_agents_dir.display()
+        )
+    })?;
+
+    let agents = ["plan.md", "qa.md", "e2e.md"];
+    let mut installed = Vec::new();
+    for name in &agents {
+        let src = src_agents_dir.join(name);
+        if !src.exists() {
+            continue;
+        }
+        let dst = dst_agents_dir.join(name);
+        std::fs::copy(&src, &dst).with_context(|| {
+            format!("Failed to copy '{}' to '{}'", src.display(), dst.display())
+        })?;
+        installed.push(*name);
+    }
+
+    if !installed.is_empty() {
+        info!(
+            "Installed agent configs {:?} into '{}'",
+            installed,
+            worktree_path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Install agent configs into every registered worktree.
+///
+/// Iterates all worktrees in the registry and calls [`install_agent_configs`]
+/// for each one, copying `plan.md`, `qa.md`, and `e2e.md` from the
+/// task-master source directory into the worktree's `.opencode/agents/`.
+///
+/// Returns a summary string suitable for printing to the user.
+pub fn cmd_install_agent_configs(registry: &Registry, base_dir: &PathBuf) -> Result<String> {
+    let mut updated = 0usize;
+    let mut skipped = 0usize;
+
+    for wt in &registry.worktrees {
+        if !wt.abs_path.exists() {
+            skipped += 1;
+            info!("Skipping '{}' — directory does not exist", wt.window_name);
+            continue;
+        }
+        match install_agent_configs(base_dir, &wt.abs_path) {
+            Ok(()) => updated += 1,
+            Err(e) => {
+                eprintln!(
+                    "Warning: could not install agent configs for '{}': {}",
+                    wt.window_name, e
+                );
+                skipped += 1;
+            }
+        }
+    }
+
+    Ok(format!(
+        "Agent configs installed in {} worktree(s){skipped_note}.",
+        updated,
+        skipped_note = if skipped > 0 {
+            format!(" ({} skipped — see warnings above)", skipped)
+        } else {
+            String::new()
+        }
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // add-worktree
 // ---------------------------------------------------------------------------
 
@@ -398,6 +492,17 @@ pub fn cmd_add_worktree(
             window_name,
             e,
             worktree_path.display()
+        ),
+    }
+
+    // Install opencode agent configs (plan.md, qa.md, e2e.md) so that
+    // `opencode --agent plan/qa/e2e` works from inside this worktree.
+    match install_agent_configs(base_dir, &worktree_path) {
+        Ok(()) => {}
+        Err(e) => eprintln!(
+            "Warning: could not install agent configs for {}: {}. \
+             Run `task-master install-agent-configs` manually later.",
+            window_name, e
         ),
     }
 
@@ -866,6 +971,103 @@ repo = "projects/beta"
             content, "../.beads",
             "content must still be '../.beads' after second call"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // install_agent_configs
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_install_agent_configs_copies_files() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let src_dir = root.path().join("task-master");
+        let dst_dir = root.path().join("worktree");
+        let agents_src = src_dir.join(".opencode").join("agents");
+        std::fs::create_dir_all(&agents_src).unwrap();
+        std::fs::create_dir_all(&dst_dir).unwrap();
+
+        // Write source agent configs.
+        std::fs::write(agents_src.join("plan.md"), "plan content").unwrap();
+        std::fs::write(agents_src.join("qa.md"), "qa content").unwrap();
+        std::fs::write(agents_src.join("e2e.md"), "e2e content").unwrap();
+
+        install_agent_configs(&src_dir, &dst_dir).unwrap();
+
+        let agents_dst = dst_dir.join(".opencode").join("agents");
+        assert_eq!(std::fs::read_to_string(agents_dst.join("plan.md")).unwrap(), "plan content");
+        assert_eq!(std::fs::read_to_string(agents_dst.join("qa.md")).unwrap(), "qa content");
+        assert_eq!(std::fs::read_to_string(agents_dst.join("e2e.md")).unwrap(), "e2e content");
+    }
+
+    #[test]
+    fn test_install_agent_configs_creates_dest_dir_if_missing() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let src_dir = root.path().join("task-master");
+        let dst_dir = root.path().join("worktree");
+        let agents_src = src_dir.join(".opencode").join("agents");
+        std::fs::create_dir_all(&agents_src).unwrap();
+        // dst_dir/.opencode/agents does NOT exist yet.
+        std::fs::create_dir_all(&dst_dir).unwrap();
+
+        std::fs::write(agents_src.join("plan.md"), "plan").unwrap();
+        install_agent_configs(&src_dir, &dst_dir).unwrap();
+
+        assert!(dst_dir.join(".opencode").join("agents").join("plan.md").exists());
+    }
+
+    #[test]
+    fn test_install_agent_configs_skips_missing_source_files() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let src_dir = root.path().join("task-master");
+        let dst_dir = root.path().join("worktree");
+        let agents_src = src_dir.join(".opencode").join("agents");
+        std::fs::create_dir_all(&agents_src).unwrap();
+        std::fs::create_dir_all(&dst_dir).unwrap();
+
+        // Only plan.md exists in source; qa.md and e2e.md are absent.
+        std::fs::write(agents_src.join("plan.md"), "plan").unwrap();
+        install_agent_configs(&src_dir, &dst_dir).unwrap();
+
+        let agents_dst = dst_dir.join(".opencode").join("agents");
+        assert!(agents_dst.join("plan.md").exists(), "plan.md should be copied");
+        assert!(!agents_dst.join("qa.md").exists(), "qa.md should be skipped");
+        assert!(!agents_dst.join("e2e.md").exists(), "e2e.md should be skipped");
+    }
+
+    #[test]
+    fn test_install_agent_configs_overwrites_existing() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let src_dir = root.path().join("task-master");
+        let dst_dir = root.path().join("worktree");
+        let agents_src = src_dir.join(".opencode").join("agents");
+        let agents_dst = dst_dir.join(".opencode").join("agents");
+        std::fs::create_dir_all(&agents_src).unwrap();
+        std::fs::create_dir_all(&agents_dst).unwrap();
+
+        // Pre-populate destination with old content.
+        std::fs::write(agents_dst.join("plan.md"), "old content").unwrap();
+        std::fs::write(agents_src.join("plan.md"), "new content").unwrap();
+
+        install_agent_configs(&src_dir, &dst_dir).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(agents_dst.join("plan.md")).unwrap(),
+            "new content",
+            "install_agent_configs should overwrite stale files"
+        );
+    }
+
+    #[test]
+    fn test_install_agent_configs_empty_source_is_ok() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let src_dir = root.path().join("task-master");
+        let dst_dir = root.path().join("worktree");
+        // Source has NO .opencode/agents directory at all.
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&dst_dir).unwrap();
+
+        // Should not error even when no files exist to copy.
+        install_agent_configs(&src_dir, &dst_dir).unwrap();
     }
 
     // -------------------------------------------------------------------------

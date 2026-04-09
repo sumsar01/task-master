@@ -364,7 +364,8 @@ pub fn cmd_install_agent_configs(registry: &Registry, base_dir: &PathBuf) -> Res
 // Git identity helpers
 // ---------------------------------------------------------------------------
 
-/// Write `user.name` and `user.email` into a bare repo's git config.
+/// Write `user.name`, `user.email`, and `credential.https://github.com.username`
+/// into a bare repo's git config.
 ///
 /// This is the canonical place to set a per-project git identity — all linked
 /// worktrees inherit the bare repo's "local" config, so a single write here
@@ -374,6 +375,13 @@ pub fn cmd_install_agent_configs(registry: &Registry, base_dir: &PathBuf) -> Res
 /// stored under a directory path that triggers an unintended `includeIf` rule in
 /// `~/.gitconfig` (e.g. whiteaway project worktrees stored under the sumsar01
 /// directory tree).
+///
+/// The credential username override is critical for QA agents: if an `includeIf`
+/// rule injects a different `credential.username` (e.g. `sumsar01`), the gh
+/// credential helper cannot find credentials for that account and git falls back
+/// to an interactive password prompt — hanging the agent indefinitely. Writing
+/// the correct username here (derived from `name`) ensures the credential helper
+/// is called with the right account.
 ///
 /// Both `name` and `email` must be `Some`; if either is `None` the function is
 /// a no-op (returns `Ok(())`).
@@ -415,12 +423,20 @@ pub fn write_git_identity_to_repo(
 
     git_config("user.name", name)?;
     git_config("user.email", email)?;
+    // Override the HTTPS credential username so that the gh credential helper is
+    // invoked with the correct GitHub account name. Without this, an `includeIf`
+    // rule in ~/.gitconfig (e.g. for a personal account) can inject a different
+    // username, causing the credential helper to return nothing and git to fall
+    // back to an interactive password prompt — which hangs any non-interactive
+    // agent session (QA, plan, e2e).
+    git_config("credential.https://github.com.username", name)?;
 
     info!(
-        "Set git identity in '{}': name={}, email={}",
+        "Set git identity in '{}': name={}, email={}, credential_username={}",
         repo_path.display(),
         name,
-        email
+        email,
+        name,
     );
     Ok(())
 }
@@ -1448,6 +1464,71 @@ repo = "projects/beta"
             String::from_utf8_lossy(&email.stdout).trim(),
             "alice@example.com",
             "user.email should be alice@example.com"
+        );
+    }
+
+    #[test]
+    fn test_write_git_identity_also_sets_credential_username() {
+        // Regression: QA agents in Whiteaway worktrees hung waiting for a git
+        // credential password because an includeIf rule injected username=sumsar01
+        // while the active gh account was skrwhiteaway.  Writing the credential
+        // username to the bare repo config overrides the includeIf value so the
+        // correct account is used for HTTPS operations.
+        let root = tempfile::tempdir().expect("tempdir");
+        let bare = root.path().join("cred.git");
+        make_bare_repo(&bare);
+
+        write_git_identity_to_repo(
+            &bare,
+            Some("skrwhiteaway"),
+            Some("98815660+skrwhiteaway@users.noreply.github.com"),
+        )
+        .unwrap();
+
+        let cred_user = Command::new("git")
+            .args(["-C"])
+            .arg(&bare)
+            .args([
+                "config",
+                "--local",
+                "credential.https://github.com.username",
+            ])
+            .output()
+            .unwrap();
+
+        assert!(
+            cred_user.status.success(),
+            "credential.https://github.com.username should be set in local repo config"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&cred_user.stdout).trim(),
+            "skrwhiteaway",
+            "credential username should match git_name (skrwhiteaway)"
+        );
+    }
+
+    #[test]
+    fn test_write_git_identity_credential_username_not_set_when_noop() {
+        // When name is None, the credential username must NOT be written either.
+        let root = tempfile::tempdir().expect("tempdir");
+        let bare = root.path().join("cred_noop.git");
+        make_bare_repo(&bare);
+
+        write_git_identity_to_repo(&bare, None, None).unwrap();
+
+        let out = Command::new("git")
+            .args(["-C"])
+            .arg(&bare)
+            .args([
+                "config",
+                "--local",
+                "credential.https://github.com.username",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "credential username should not be set when name/email are both None"
         );
     }
 

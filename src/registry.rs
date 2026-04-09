@@ -14,6 +14,10 @@ fn default_collapsed() -> bool {
     false
 }
 
+fn default_language() -> String {
+    "typescript".to_string()
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct ProjectConfig {
     pub name: String,
@@ -33,6 +37,11 @@ pub struct ProjectConfig {
     /// E.g. "warehouse", "fulfillment".  Not displayed in the TUI yet.
     #[serde(default)]
     pub context: Option<String>,
+    /// Primary language for serena's language server (e.g. "typescript", "rust").
+    /// Defaults to "typescript" if not specified.
+    /// Used when auto-creating `.serena/project.yml` in new worktrees.
+    #[serde(default = "default_language")]
+    pub language: String,
 }
 
 fn default_theme() -> String {
@@ -495,6 +504,32 @@ name = "main"
                 proj.name
             );
         }
+    }
+
+    #[test]
+    fn test_language_field_defaults_to_typescript() {
+        // SIMPLE_TOML has no `language` key — should default to "typescript".
+        let reg = registry_from_toml(SIMPLE_TOML).unwrap();
+        for proj in &reg.projects {
+            assert_eq!(
+                proj.language, "typescript",
+                "language should default to 'typescript' for project '{}'",
+                proj.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_language_field_explicit_rust() {
+        let toml = r#"
+[[projects]]
+name = "task-master"
+short = "TM"
+repo = "projects/task-master"
+language = "rust"
+"#;
+        let reg = registry_from_toml(toml).unwrap();
+        assert_eq!(reg.projects[0].language, "rust");
     }
 
     #[test]

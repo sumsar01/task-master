@@ -1,41 +1,32 @@
 use crate::registry::Registry;
-use crate::templates;
 use crate::tmux;
 use anyhow::Result;
 use std::path::Path;
 use tracing::info;
 
-/// Build the inline planning prompt passed to the opencode agent.
+/// Build the inline planning prompt passed to the opencode agent via `--prompt`.
 ///
-/// Tries to load a custom template from `<base_dir>/.opencode/agents/plan.md`
-/// first. If the file exists its body (with YAML frontmatter stripped) is used
-/// as the template with `{{token}}` placeholders substituted at runtime.
-/// Falls back to the built-in string constant when the file is absent.
+/// The `.opencode/agents/plan.md` file (present in each target worktree) provides
+/// the agent's *system prompt* and metadata (model, permissions, mode) — opencode
+/// reads that file directly when started with `--agent plan`.  That file must NOT
+/// contain task-specific placeholders because opencode uses it verbatim.
 ///
-/// The agent is instructed to:
-///   1. Explore the codebase and understand the existing architecture.
-///   2. Ask clarifying questions using opencode's native question tool.
-///   3. Decompose the task into concrete beads issues (`bd create`, `bd dep add`).
-///   4. Rename the window to `:ready` when done.
+/// This function builds the *user prompt* (`--prompt` argument) that carries the
+/// actual task description and all phase-by-phase instructions.  It is always
+/// rendered inline from the built-in string so there is no ambiguity between the
+/// agent system-prompt file and the per-invocation task content.
 ///
 /// `session` and `window_base` are injected so the agent can rename its own
 /// tmux window without any external tooling, using the same awk-based pattern
 /// as the QA agent.
-pub fn build_plan_prompt(base_dir: &Path, task: &str, session: &str, window_base: &str) -> String {
+pub fn build_plan_prompt(_base_dir: &Path, task: &str, session: &str, window_base: &str) -> String {
     // Awk-based rename command that avoids colon-in-target tmux ambiguity.
     let rename_cmd = tmux::build_rename_cmd(session, window_base);
     let ready_rename = format!("{} '{base}:ready'", rename_cmd, base = window_base);
 
-    let vars: &[(&str, &str)] = &[("task", task), ("ready_rename", &ready_rename)];
-
-    if let Some(raw) = templates::load(base_dir, "plan") {
-        let body = templates::strip_frontmatter(&raw);
-        return templates::render(body, vars);
-    }
-
     format!(
         "You are a planning agent. Your ONLY job is to analyse the codebase, ask any \
-         clarifying questions, then decompose the following task into a set of beads issues \
+         clarifying questions, then decompose the following task into a clear written plan \
          ready for dev agents to pick up. You must NOT write any code or modify any source \
          files.\n\
          \n\
@@ -50,75 +41,53 @@ pub fn build_plan_prompt(base_dir: &Path, task: &str, session: &str, window_base
          - Anything that might constrain the implementation\n\
          \n\
          PHASE 2 — Resolve open questions\n\
-          \n\
-          For any open question about how to approach the task:\n\
-          \n\
-          1. First, answer it yourself using what you found in Phase 1. Most implementation\n\
-             details, naming choices, and design patterns can be decided by reading the\n\
-             existing code and following its conventions.\n\
-          \n\
-          2. Document your assumptions in the relevant issue descriptions (--description),\n\
-             not in separate files. Use phrasing like: \"Assuming X because Y — revisit if Z.\"\n\
-          \n\
-          3. Only use the `question` tool when ALL of the following are true:\n\
-             - The answer would fundamentally change the scope or architecture of the plan\n\
-             - You cannot make a reasonable assumption from the codebase\n\
-             - Getting it wrong would require discarding most of the work\n\
-          \n\
-          For everything else — naming, ordering, minor design choices, edge-case handling —\n\
-          make a call and document it in the issue description.\n\
          \n\
-         PHASE 3 — Create beads issues\n\
+         For any open question about how to approach the task:\n\
          \n\
-         Break the task down into concrete, independently-workable issues. For each issue:\n\
+         1. First, answer it yourself using what you found in Phase 1. Most implementation\n\
+            details, naming choices, and design patterns can be decided by reading the\n\
+            existing code and following its conventions.\n\
          \n\
-         ```bash\n\
-         bd create \"<title>\" \\\n\
-           --description=\"<why this issue exists and exactly what needs to be done>\" \\\n\
-           --type=feature|task|bug|chore \\\n\
-           --priority=0-4 \\\n\
-           --json\n\
-         ```\n\
+         2. Document your assumptions in the plan. Use phrasing like:\n\
+            \"Assuming X because Y — revisit if Z.\"\n\
          \n\
-         Guidelines for good issues:\n\
-         - Title is short and action-oriented (\"Add X\", \"Refactor Y\", \"Fix Z\")\n\
-         - Description explains the WHY and the WHAT, not just restates the title\n\
-         - Each issue is completable by a single dev agent in one session\n\
-         - Priority reflects actual urgency: 0=critical, 1=high, 2=medium, 3=low, 4=backlog\n\
+         3. Only use the `question` tool when ALL of the following are true:\n\
+            - The answer would fundamentally change the scope or architecture of the plan\n\
+            - You cannot make a reasonable assumption from the codebase\n\
+            - Getting it wrong would require discarding most of the work\n\
          \n\
-         PHASE 4 — Wire up dependencies\n\
+         For everything else — naming, ordering, minor design choices, edge-case handling —\n\
+         make a call and document it.\n\
          \n\
-         For any issue that must be completed before another can start:\n\
-         ```bash\n\
-         bd dep add <blocked-issue-id> <blocking-issue-id>   # blocked depends on blocking\n\
-         ```\n\
+         PHASE 3 — Write the plan\n\
          \n\
-         After wiring deps, verify the graph looks correct:\n\
-         ```bash\n\
-         bd ready --json   # shows unblocked issues — your starting points\n\
-         bd blocked --json # confirms blocked issues have correct deps\n\
-         ```\n\
+         Break the task down into concrete, independently-workable tasks. For each task write:\n\
          \n\
-         PHASE 5 — Signal completion\n\
+         - Title — short and action-oriented (\"Add X\", \"Refactor Y\", \"Fix Z\")\n\
+         - Description — the WHY and the WHAT; what needs to be done and why it exists\n\
+         - Type — feature | task | bug | chore\n\
+         - Priority — 0=critical, 1=high, 2=medium, 3=low, 4=backlog\n\
+         - Depends on — list any tasks from this plan that must be done first (or \"none\")\n\
          \n\
-         Once all issues are created and deps wired, rename this window to signal the plan\n\
-         is ready for a dev agent:\n\
+         Each task must be completable by a single dev agent in one session.\n\
+         If you discover incidental issues unrelated to this task, list them at the end\n\
+         under a \"Discovered\" section with a note on why they were found.\n\
+         \n\
+         PHASE 4 — Signal completion\n\
+         \n\
+         Once the plan is written, rename this window to signal it is ready:\n\
          \n\
          {ready_rename}\n\
          \n\
          Then print a brief summary:\n\
-         - How many issues were created\n\
-         - Which issues are immediately ready (no blockers)\n\
-         - Any open questions or assumptions you documented in issue descriptions\n\
+         - How many tasks are in the plan\n\
+         - Which tasks have no blockers (starting points)\n\
+         - Any assumptions or open questions noted in the plan\n\
          \n\
          IMPORTANT RULES\n\
          - Do NOT modify any source files.\n\
          - Do NOT open PRs or create branches.\n\
-         - Do NOT start implementing — only plan.\n\
-         - Use `bd create` for ALL task tracking; do not create markdown todo lists.\n\
-         - If you discover issues unrelated to this task while exploring, create them with\n\
-           `--deps discovered-from:<nearest-relevant-issue-id>` so they are linked.\n\
-         - bd CLI is available. Use `bd --help` if you need to check command syntax.",
+         - Do NOT start implementing — only plan.",
         task = task,
         ready_rename = ready_rename,
     )
@@ -220,19 +189,23 @@ mod tests {
     }
 
     #[test]
-    fn test_build_plan_prompt_bd_commands_present() {
+    fn test_build_plan_prompt_plan_structure_present() {
         let prompt = build_plan_prompt(no_template(), "task", "s", "W-w");
         assert!(
-            prompt.contains("bd create"),
-            "prompt must include bd create"
+            prompt.contains("Write the plan"),
+            "prompt must include plan-writing phase"
         );
         assert!(
-            prompt.contains("bd dep add"),
-            "prompt must include bd dep add"
+            prompt.contains("Priority"),
+            "prompt must include priority field"
         );
         assert!(
-            prompt.contains("bd ready"),
-            "prompt must include bd ready verification"
+            prompt.contains("Depends on"),
+            "prompt must include dependency field"
+        );
+        assert!(
+            !prompt.contains("bd create"),
+            "prompt must not include bd create commands"
         );
     }
 

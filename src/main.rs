@@ -103,6 +103,13 @@ enum Commands {
     },
     /// Install QA post-push git hooks into all registered worktrees
     InstallQaHooks,
+    /// Install opencode agent configs (plan.md, qa.md, e2e.md) into all registered worktrees
+    ///
+    /// Copies the agent config files from the task-master project into each worktree's
+    /// .opencode/agents/ directory so that `opencode --agent plan/qa/e2e` works when
+    /// running inside those worktrees. Run this once for existing worktrees; new
+    /// worktrees receive the configs automatically via `add-worktree`.
+    InstallAgentConfigs,
     /// Reset a worktree window's phase indicator back to idle
     Reset {
         /// Worktree window name, e.g. WIS-olive (with or without phase suffix)
@@ -217,6 +224,10 @@ fn main() -> Result<()> {
                     pr_number,
                 } => e2e::cmd_e2e(&registry, &worktree, pr_number),
                 Commands::InstallQaHooks => hooks::cmd_install_qa_hooks(&registry),
+                Commands::InstallAgentConfigs => {
+                    worktree::cmd_install_agent_configs(&registry, &base_dir)
+                        .map(|msg| println!("{}", msg))
+                }
                 Commands::Reset { worktree } => cmd_reset(&worktree),
                 Commands::Supervise => supervise::cmd_supervise(&registry),
                 Commands::Status => status::cmd_status(&registry),

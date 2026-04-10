@@ -271,20 +271,28 @@ pub fn register_in_serena_config(worktree_path: &Path) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Copy `plan.md`, `qa.md`, and `e2e.md` from the task-master project's
-/// `.opencode/agents/` directory into `<worktree_path>/.opencode/agents/`.
+/// `.opencode/agents/` directory into `<worktree_path>/.opencode/agents/`,
+/// and copy `.opencode/opencode.json` into `<worktree_path>/opencode.json`.
 ///
-/// These files are the opencode agent configurations consumed by
+/// The agent `.md` files are the opencode agent configurations consumed by
 /// `opencode --agent plan/qa/e2e` when running inside the target worktree.
 /// They must be present in the *worktree's own directory* because opencode
 /// looks for agent configs relative to its current working directory, not
 /// relative to the task-master project root.
 ///
-/// `base_dir` is the task-master project root (source of agent configs).
+/// The `opencode.json` is the project-level permission config. It pre-approves
+/// `/tmp/**` under `external_directory` so that agents (including default dev
+/// sessions spawned by `task-master spawn`) can read/write task-master
+/// coordination files in `/tmp` without triggering permission prompts on every
+/// access. It is placed at the worktree root (not inside `.opencode/`) because
+/// opencode resolves `opencode.json` from the project working directory.
+///
+/// `base_dir` is the task-master project root (source of configs).
 /// `worktree_path` is the target worktree directory (destination).
 ///
-/// Only files that actually exist in `base_dir/.opencode/agents/` are
-/// copied — missing source files are silently skipped.
-/// Existing destination files are always overwritten so updates propagate.
+/// Only files that actually exist in the source are copied — missing source
+/// files are silently skipped. Existing destination files are always overwritten
+/// so updates propagate when `task-master install-agent-configs` is re-run.
 pub fn install_agent_configs(base_dir: &Path, worktree_path: &Path) -> Result<()> {
     let src_agents_dir = base_dir.join(".opencode").join("agents");
     let dst_agents_dir = worktree_path.join(".opencode").join("agents");
@@ -308,6 +316,21 @@ pub fn install_agent_configs(base_dir: &Path, worktree_path: &Path) -> Result<()
             format!("Failed to copy '{}' to '{}'", src.display(), dst.display())
         })?;
         installed.push(*name);
+    }
+
+    // Distribute opencode.json (permission config) to the worktree root.
+    // This pre-approves /tmp access for all agents, including default dev sessions.
+    let src_opencode_json = base_dir.join(".opencode").join("opencode.json");
+    if src_opencode_json.exists() {
+        let dst_opencode_json = worktree_path.join("opencode.json");
+        std::fs::copy(&src_opencode_json, &dst_opencode_json).with_context(|| {
+            format!(
+                "Failed to copy '{}' to '{}'",
+                src_opencode_json.display(),
+                dst_opencode_json.display()
+            )
+        })?;
+        installed.push("opencode.json");
     }
 
     if !installed.is_empty() {
@@ -350,7 +373,7 @@ pub fn cmd_install_agent_configs(registry: &Registry, base_dir: &PathBuf) -> Res
     }
 
     Ok(format!(
-        "Agent configs installed in {} worktree(s){skipped_note}.",
+        "Agent configs and permissions installed in {} worktree(s){skipped_note}.",
         updated,
         skipped_note = if skipped > 0 {
             format!(" ({} skipped — see warnings above)", skipped)
@@ -1261,6 +1284,80 @@ repo = "projects/beta"
 
         // Should not error even when no files exist to copy.
         install_agent_configs(&src_dir, &dst_dir).unwrap();
+    }
+
+    #[test]
+    fn test_install_agent_configs_copies_opencode_json() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let src_dir = root.path().join("task-master");
+        let dst_dir = root.path().join("worktree");
+        let agents_src = src_dir.join(".opencode").join("agents");
+        std::fs::create_dir_all(&agents_src).unwrap();
+        std::fs::create_dir_all(&dst_dir).unwrap();
+
+        // Write opencode.json in source .opencode/ dir.
+        let opencode_json_content = r#"{"$schema":"https://opencode.ai/config.json"}"#;
+        std::fs::write(
+            src_dir.join(".opencode").join("opencode.json"),
+            opencode_json_content,
+        )
+        .unwrap();
+
+        install_agent_configs(&src_dir, &dst_dir).unwrap();
+
+        // opencode.json must be placed at the worktree root, not inside .opencode/.
+        let dst_json = dst_dir.join("opencode.json");
+        assert!(dst_json.exists(), "opencode.json should be copied to worktree root");
+        assert_eq!(
+            std::fs::read_to_string(&dst_json).unwrap(),
+            opencode_json_content
+        );
+    }
+
+    #[test]
+    fn test_install_agent_configs_skips_opencode_json_when_absent() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let src_dir = root.path().join("task-master");
+        let dst_dir = root.path().join("worktree");
+        let agents_src = src_dir.join(".opencode").join("agents");
+        std::fs::create_dir_all(&agents_src).unwrap();
+        std::fs::create_dir_all(&dst_dir).unwrap();
+
+        // No opencode.json in source — install should succeed without error.
+        std::fs::write(agents_src.join("plan.md"), "plan").unwrap();
+        install_agent_configs(&src_dir, &dst_dir).unwrap();
+
+        // opencode.json must NOT be created in the destination.
+        assert!(
+            !dst_dir.join("opencode.json").exists(),
+            "opencode.json should not appear when source is absent"
+        );
+    }
+
+    #[test]
+    fn test_install_agent_configs_overwrites_opencode_json() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let src_dir = root.path().join("task-master");
+        let dst_dir = root.path().join("worktree");
+        let agents_src = src_dir.join(".opencode").join("agents");
+        std::fs::create_dir_all(&agents_src).unwrap();
+        std::fs::create_dir_all(&dst_dir).unwrap();
+
+        // Pre-populate destination with old content.
+        std::fs::write(dst_dir.join("opencode.json"), "old").unwrap();
+        std::fs::write(
+            src_dir.join(".opencode").join("opencode.json"),
+            "new",
+        )
+        .unwrap();
+
+        install_agent_configs(&src_dir, &dst_dir).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dst_dir.join("opencode.json")).unwrap(),
+            "new",
+            "install_agent_configs should overwrite stale opencode.json"
+        );
     }
 
     // -------------------------------------------------------------------------

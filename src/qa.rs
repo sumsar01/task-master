@@ -120,24 +120,30 @@ pub fn build_qa_prompt(
          Fix anything you can fix directly.\n\
          \n\
          Step 2 - Resolve bot/reviewer comments\n\
-         First, fetch all open review threads and their IDs:\n\
+         First, fetch all open review threads and their comment text:\n\
            gh api graphql -f query='{{\n\
              repository(owner:\"{owner}\", name:\"{name}\") {{\n\
                pullRequest(number: {pr}) {{\n\
                  reviewThreads(first: 50) {{\n\
-                   nodes {{ id isResolved body }}\n\
+                   nodes {{\n\
+                     id\n\
+                     isResolved\n\
+                     comments(first: 5) {{ nodes {{ body }} }}\n\
+                   }}\n\
                  }}\n\
                }}\n\
              }}\n\
            }}'\n\
          For every thread where isResolved is false:\n\
+         - Read the comment body from comments.nodes[0].body to understand what the reviewer asked.\n\
          - If the comment is actionable by a code change: apply the fix in the code.\n\
            Then mark the thread resolved:\n\
              gh api graphql -f query='mutation {{\n\
-               resolveReviewThread(input: {{ threadId: \"<threadId>\" }}) {{\n\
+               resolveReviewThread(input: {{ threadId: \"<id>\" }}) {{\n\
                  thread {{ isResolved }}\n\
                }}\n\
              }}'\n\
+           Replace <id> with the thread id from the fetch query above.\n\
          - If the comment is a question or requires human judgement: leave it unresolved.\n\
          \n\
          Step 3 - Check CI status\n\
@@ -635,6 +641,52 @@ mod tests {
         assert!(prompt.contains("acme"));
         assert!(prompt.contains("isResolved"));
         assert!(prompt.contains("human judgement"));
+    }
+
+    #[test]
+    fn test_build_qa_prompt_step2_fetch_includes_comments_field() {
+        // The fetch query must request comment text so the agent can read
+        // what the reviewer wrote. Inline diff thread bodies are in
+        // comments.nodes.body, not the thread-level body field.
+        let prompt = build_qa_prompt(
+            no_template(),
+            "acme/repo",
+            "feat/foo",
+            55,
+            "s",
+            "W-w",
+            "master",
+        );
+        assert!(
+            prompt.contains("comments(first: 5)"),
+            "fetch query should request comments field to read reviewer text"
+        );
+        assert!(
+            prompt.contains("comments.nodes[0].body"),
+            "prompt should instruct agent to read comment text from comments.nodes[0].body"
+        );
+    }
+
+    #[test]
+    fn test_build_qa_prompt_step2_does_not_resolve_questions() {
+        // Guard: questions and human-judgement comments must never be auto-resolved.
+        let prompt = build_qa_prompt(
+            no_template(),
+            "acme/repo",
+            "feat/foo",
+            55,
+            "s",
+            "W-w",
+            "master",
+        );
+        assert!(
+            prompt.contains("human judgement") || prompt.contains("human-judgement"),
+            "prompt must preserve the rule about not resolving human-judgement threads"
+        );
+        assert!(
+            prompt.contains("leave it unresolved"),
+            "prompt must explicitly say to leave human-judgement threads unresolved"
+        );
     }
 
     // --- Bug 3: validate_branch ---

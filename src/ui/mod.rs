@@ -1,4 +1,5 @@
 pub mod confirm_close;
+pub mod confirm_remove_worktree;
 pub mod help;
 pub mod main_screen;
 pub mod prompt;
@@ -40,5 +41,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // Confirm-close modal — shown on top of everything when closing a window.
     if app.mode == crate::tui::Mode::ConfirmClose {
         confirm_close::render(f, app, &t);
+    }
+
+    // Confirm-remove-worktree modal — shown when user pressed D on a worktree.
+    if app.mode == crate::tui::Mode::ConfirmRemoveWorktree {
+        confirm_remove_worktree::render(f, app, &t);
     }
 }

@@ -1,16 +1,9 @@
 use crate::registry::Registry;
-use crate::templates;
 use crate::tmux;
 use anyhow::Result;
-use std::path::Path;
 use tracing::info;
 
 /// Build the inline planning prompt passed to the opencode agent.
-///
-/// Tries to load a custom template from `<base_dir>/.opencode/agents/plan.md`
-/// first. If the file exists its body (with YAML frontmatter stripped) is used
-/// as the template with `{{token}}` placeholders substituted at runtime.
-/// Falls back to the built-in string constant when the file is absent.
 ///
 /// The agent is instructed to:
 ///   1. Explore the codebase and understand the existing architecture.
@@ -21,17 +14,10 @@ use tracing::info;
 /// `session` and `window_base` are injected so the agent can rename its own
 /// tmux window without any external tooling, using the same awk-based pattern
 /// as the QA agent.
-pub fn build_plan_prompt(base_dir: &Path, task: &str, session: &str, window_base: &str) -> String {
+pub fn build_plan_prompt(task: &str, session: &str, window_base: &str) -> String {
     // Awk-based rename command that avoids colon-in-target tmux ambiguity.
     let rename_cmd = tmux::build_rename_cmd(session, window_base);
     let ready_rename = format!("{} '{base}:ready'", rename_cmd, base = window_base);
-
-    let vars: &[(&str, &str)] = &[("task", task), ("ready_rename", &ready_rename)];
-
-    if let Some(raw) = templates::load(base_dir, "plan") {
-        let body = templates::strip_frontmatter(&raw);
-        return templates::render(body, vars);
-    }
 
     format!(
         "You are a planning agent. Your ONLY job is to analyse the codebase, ask any \
@@ -143,7 +129,7 @@ pub fn cmd_plan(registry: &Registry, worktree_name: &str, task: &str) -> Result<
     let base_name = tmux::base_window_name(worktree_name).to_string();
     let abs_path_str = worktree.abs_path.to_string_lossy().to_string();
 
-    let prompt = build_plan_prompt(&registry.base_dir, task, &session, &base_name);
+    let prompt = build_plan_prompt(task, &session, &base_name);
 
     info!(
         "[{}] Starting planning agent in session '{}'",
@@ -176,26 +162,16 @@ pub fn cmd_plan(registry: &Registry, worktree_name: &str, task: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
-
-    fn no_template() -> &'static Path {
-        Path::new("/tmp/no-such-dir-for-plan-tests")
-    }
 
     #[test]
     fn test_build_plan_prompt_contains_task() {
-        let prompt = build_plan_prompt(
-            no_template(),
-            "implement OAuth login",
-            "mysession",
-            "WIS-olive",
-        );
+        let prompt = build_plan_prompt("implement OAuth login", "mysession", "WIS-olive");
         assert!(prompt.contains("implement OAuth login"));
     }
 
     #[test]
     fn test_build_plan_prompt_contains_ready_rename() {
-        let prompt = build_plan_prompt(no_template(), "some task", "my-session", "WIS-olive");
+        let prompt = build_plan_prompt("some task", "my-session", "WIS-olive");
         assert!(
             prompt.contains("WIS-olive:ready"),
             "prompt should reference ready phase rename"
@@ -208,7 +184,7 @@ mod tests {
 
     #[test]
     fn test_build_plan_prompt_no_code_changes() {
-        let prompt = build_plan_prompt(no_template(), "add feature", "s", "W-w");
+        let prompt = build_plan_prompt("add feature", "s", "W-w");
         assert!(
             prompt.contains("Do NOT modify any source files"),
             "prompt must forbid code changes"
@@ -221,7 +197,7 @@ mod tests {
 
     #[test]
     fn test_build_plan_prompt_bd_commands_present() {
-        let prompt = build_plan_prompt(no_template(), "task", "s", "W-w");
+        let prompt = build_plan_prompt("task", "s", "W-w");
         assert!(
             prompt.contains("bd create"),
             "prompt must include bd create"
@@ -239,7 +215,7 @@ mod tests {
     #[test]
     fn test_build_plan_prompt_rename_uses_awk_pattern() {
         // Must use the index-based awk rename to avoid colon-in-target ambiguity.
-        let prompt = build_plan_prompt(no_template(), "task", "sess", "PROJ-branch");
+        let prompt = build_plan_prompt("task", "sess", "PROJ-branch");
         assert!(prompt.contains("awk"), "should use awk-based rename");
         assert!(
             prompt.contains("PROJ-branch"),
@@ -253,7 +229,7 @@ mod tests {
 
     #[test]
     fn test_build_plan_prompt_question_tool_mentioned() {
-        let prompt = build_plan_prompt(no_template(), "complex task", "s", "W-w");
+        let prompt = build_plan_prompt("complex task", "s", "W-w");
         assert!(
             prompt.contains("question"),
             "prompt should mention opencode question tool for critical escalations"
@@ -272,8 +248,8 @@ mod tests {
     fn test_build_plan_prompt_is_deterministic() {
         // Calling build_plan_prompt twice with the same args must produce the same output.
         // This guards against any accidental stateful/random content.
-        let a = build_plan_prompt(no_template(), "implement OAuth", "sess", "WIS-olive");
-        let b = build_plan_prompt(no_template(), "implement OAuth", "sess", "WIS-olive");
+        let a = build_plan_prompt("implement OAuth", "sess", "WIS-olive");
+        let b = build_plan_prompt("implement OAuth", "sess", "WIS-olive");
         assert_eq!(a, b, "build_plan_prompt must be deterministic");
     }
 }

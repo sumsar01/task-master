@@ -1,4 +1,7 @@
-use crate::registry::{write_collapsed, write_group_collapsed, ProjectConfig, Registry, Worktree};
+use crate::hooks;
+use crate::registry::{
+    self, write_collapsed, write_group_collapsed, ProjectConfig, Registry, Worktree,
+};
 use crate::stats::{fetch_stats, StatsRow};
 use crate::status::find_live_phase;
 use crate::tmux;
@@ -51,6 +54,8 @@ pub enum ActionKind {
     Plan,
     Qa,
     Send,
+    /// User typed a new worktree name; Enter calls execute_add_worktree.
+    AddWorktree,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -61,9 +66,17 @@ pub enum Mode {
     ForceConfirm,
     /// Confirm-close modal: user pressed 'c', waiting for 'y' or any other key.
     ConfirmClose,
+    /// Confirm-remove-worktree modal: user pressed 'D', waiting for 'y' or any other key.
+    ConfirmRemoveWorktree,
+    /// Remove worktree has modified files: user confirmed once, Enter force-removes, Esc cancels.
+    ForceConfirmRemoveWorktree,
 }
 
 pub struct App {
+    /// Owned registry — kept live so all action dispatch (spawn, remove, etc.)
+    /// always uses an up-to-date view of task-master.toml.
+    /// Updated by `reload_from_registry` whenever the config changes.
+    pub registry: Registry,
     /// Flat list of all worktrees across all projects (stable, never reordered).
     /// Used for phase tracking, stats cache, and action dispatch.
     pub worktrees: Vec<Worktree>,
@@ -156,7 +169,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(registry: &Registry, session: String, tui_window_id: String) -> Self {
+    pub fn new(registry: Registry, session: String, tui_window_id: String) -> Self {
         let worktrees = registry.worktrees.clone();
         let projects = registry.projects.clone();
         let count = worktrees.len();
@@ -178,7 +191,10 @@ impl App {
             .position(|e| matches!(e, ListEntry::Worktree { .. }));
         list_state.select(initial_selection);
 
+        let saved_theme_id = registry.ui.theme.clone();
+
         App {
+            registry,
             worktrees,
             projects,
             group_collapsed,
@@ -206,7 +222,7 @@ impl App {
             show_help: false,
             theme_picker_cursor,
             theme_picker_original: None,
-            saved_theme_id: theme_name.clone(),
+            saved_theme_id,
             last_paste_at: Instant::now() - Duration::from_secs(10),
             last_key_at: Instant::now() - Duration::from_secs(10),
             input_history: Vec::new(),
@@ -359,7 +375,7 @@ impl App {
 
     /// Toggle the collapsed state of the project at `entry_idx` and persist
     /// the change to task-master.toml via `write_collapsed`.
-    pub fn toggle_collapse(&mut self, entry_idx: usize, registry: &Registry) {
+    pub fn toggle_collapse(&mut self, entry_idx: usize) {
         let (proj_idx, new_collapsed) = if let Some(ListEntry::ProjectHeader {
             project_idx,
             collapsed,
@@ -376,12 +392,12 @@ impl App {
         self.rebuild_entries();
 
         // Persist (best-effort; don't crash TUI on write failure).
-        let _ = write_collapsed(&registry.base_dir, &project_name, new_collapsed);
+        let _ = write_collapsed(&self.registry.base_dir, &project_name, new_collapsed);
     }
 
     /// Toggle the collapsed state of the super-group at `entry_idx` and persist
     /// the change to task-master.toml via `write_group_collapsed`.
-    pub fn toggle_group_collapse(&mut self, entry_idx: usize, registry: &Registry) {
+    pub fn toggle_group_collapse(&mut self, entry_idx: usize) {
         let (group_name, new_collapsed) =
             if let Some(ListEntry::GroupHeader {
                 name, collapsed, ..
@@ -408,7 +424,7 @@ impl App {
         }
 
         // Persist (best-effort; don't crash TUI on write failure).
-        let _ = write_group_collapsed(&registry.base_dir, &group_name, new_collapsed);
+        let _ = write_group_collapsed(&self.registry.base_dir, &group_name, new_collapsed);
     }
 
     pub fn selected(&self) -> Option<usize> {
@@ -642,10 +658,10 @@ impl App {
         self.theme = Theme::from_name(ALL_THEMES[self.theme_picker_cursor].0);
     }
 
-    pub fn theme_picker_commit(&mut self, registry: &Registry) {
+    pub fn theme_picker_commit(&mut self) {
         let id = ALL_THEMES[self.theme_picker_cursor].0;
         // Persist to config (best effort — don't crash TUI on write failure).
-        let _ = crate::registry::write_theme(&registry.base_dir, id);
+        let _ = crate::registry::write_theme(&self.registry.base_dir, id);
         self.saved_theme_id = id.to_string();
         self.theme_picker_original = None;
         self.show_theme_picker = false;
@@ -676,6 +692,38 @@ impl App {
         self.needs_full_redraw = true;
     }
 
+    /// Reload in-memory worktree/project state from a freshly-loaded registry.
+    ///
+    /// Called after `cmd_add_worktree` or `cmd_remove_worktree` mutates
+    /// `task-master.toml` on disk.  Rebuilds `entries` and resizes/resets
+    /// derivative caches while preserving UI state (theme, mode, history, etc.).
+    ///
+    /// After calling this, `refresh_phases()` should be called so the phase
+    /// column reflects any windows that may have appeared or disappeared.
+    pub fn reload_from_registry(&mut self, new_registry: Registry) {
+        self.worktrees = new_registry.worktrees.clone();
+        self.projects = new_registry.projects.clone();
+
+        // Resize phases vec to match new worktree count; fill new slots with '?'.
+        self.phases.resize(self.worktrees.len(), "?".to_string());
+
+        // Invalidate derived caches — indices may have shifted.
+        self.stats_cache.clear();
+        self.last_stats_idx = None;
+        self.last_preview_idx = None;
+        self.last_detail_idx = None;
+        self.preview_lines.clear();
+        self.detail_lines.clear();
+
+        // Replace the owned registry so all subsequent actions use the new state.
+        self.registry = new_registry;
+
+        // Rebuild visual entries.  rebuild_entries tries to keep the cursor on
+        // the same worktree_idx; if that index no longer exists (e.g. after a
+        // remove), it falls back to the nearest visible row.
+        self.rebuild_entries();
+    }
+
     /// Guard for keyboard actions that require a worktree to be selected.
     ///
     /// If no worktree row is currently selected, sets a status message and
@@ -692,6 +740,25 @@ impl App {
             false
         } else {
             true
+        }
+    }
+
+    /// Resolve the project short name from the currently selected entry.
+    ///
+    /// Returns `Some(project_short)` when:
+    /// - A `Worktree` row is selected → use that worktree's `project_short`.
+    /// - A `ProjectHeader` row is selected → use that project's `short` name.
+    ///
+    /// Returns `None` when a `GroupHeader`, `EmptyProject`, or nothing is selected,
+    /// i.e. when there is no unambiguous project context.
+    pub fn selected_project_short(&self) -> Option<String> {
+        let idx = self.selected()?;
+        match self.entries.get(idx)? {
+            ListEntry::Worktree { wt, .. } => Some(wt.project_short.clone()),
+            ListEntry::ProjectHeader { project_idx, .. } => {
+                self.projects.get(*project_idx).map(|p| p.short.clone())
+            }
+            _ => None,
         }
     }
 }

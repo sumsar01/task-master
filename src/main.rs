@@ -8,7 +8,6 @@ mod spawn;
 mod stats;
 mod status;
 mod supervise;
-mod templates;
 mod tmux;
 mod tui;
 mod ui;

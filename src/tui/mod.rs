@@ -32,7 +32,7 @@ pub fn cmd_tui(registry: &Registry) -> Result<()> {
     // window is created or destroyed).
     let tui_window_id = tmux::current_window_id().unwrap_or_else(|_| String::new());
 
-    let mut app = App::new(registry, session.clone(), tui_window_id);
+    let mut app = App::new(registry.clone(), session.clone(), tui_window_id);
     app.refresh_phases();
     app.load_stats_for_selected();
 
@@ -43,7 +43,7 @@ pub fn cmd_tui(registry: &Registry) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("Failed to create terminal")?;
 
-    let res = run_loop(&mut terminal, &mut app, registry);
+    let res = run_loop(&mut terminal, &mut app);
 
     disable_raw_mode().ok();
     execute!(terminal.backend_mut(), DisableBracketedPaste).ok();
@@ -57,11 +57,7 @@ pub fn cmd_tui(registry: &Registry) -> Result<()> {
 // Main event loop
 // ---------------------------------------------------------------------------
 
-fn run_loop<B: ratatui::backend::Backend>(
-    terminal: &mut Terminal<B>,
-    app: &mut App,
-    registry: &Registry,
-) -> Result<()> {
+fn run_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> {
     loop {
         if app.needs_full_redraw {
             app.needs_full_redraw = false;
@@ -99,7 +95,7 @@ fn run_loop<B: ratatui::backend::Backend>(
             for ev in events {
                 match ev {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        input::handle_key(app, registry, key.code, key.modifiers)?;
+                        input::handle_key(app, key.code, key.modifiers)?;
                         app.last_key_at = std::time::Instant::now();
                     }
                     Event::Paste(text) => {
@@ -189,7 +185,7 @@ name = "b"
         // entries: [ProjectHeader(0), Worktree(a, 1), Worktree(b, 2)]
         // App::new selects the first Worktree -> index 1.
         let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
-        let mut app = App::new(&reg, "test".to_string(), "0".to_string());
+        let mut app = App::new(reg, "test".to_string(), "0".to_string());
         // Navigate to the first worktree (idx 1) and move up — should wrap to
         // the last worktree (idx 2), skipping EmptyProject rows (none here) and
         // landing on the ProjectHeader when no other worktrees exist above it is
@@ -220,7 +216,7 @@ name = "a"
 name = "b"
 "#;
         let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
-        let mut app = App::new(&reg, "test".to_string(), "0".to_string());
+        let mut app = App::new(reg, "test".to_string(), "0".to_string());
         // entries: [Header(0), Wt-a(1), Wt-b(2)]
         // Start at first entry (header, idx 0) and move up — wraps to last (Wt-b, idx 2).
         app.list_state.select(Some(0));
@@ -245,7 +241,7 @@ name = "b"
 "#;
         // entries: [ProjectHeader(0), Worktree(a, 1), Worktree(b, 2)]
         let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
-        let mut app = App::new(&reg, "test".to_string(), "0".to_string());
+        let mut app = App::new(reg, "test".to_string(), "0".to_string());
         // Start at last entry and move down — wraps to first (header, idx 0).
         app.list_state.select(Some(2));
         app.move_down();
@@ -267,7 +263,7 @@ repo = "projects/svc"
 name = "a"
 "#;
         let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
-        let mut app = App::new(&reg, "test".to_string(), "0".to_string());
+        let mut app = App::new(reg, "test".to_string(), "0".to_string());
 
         app.set_status("hello");
         assert_eq!(app.current_status(), Some("hello"));
@@ -292,7 +288,7 @@ repo = "projects/svc"
 name = "alpha"
 "#;
         let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
-        let app = App::new(&reg, "test".to_string(), "0".to_string());
+        let app = App::new(reg, "test".to_string(), "0".to_string());
         // App::new selects the first Worktree entry; selected_worktree() resolves it.
         let wt = app
             .selected_worktree()
@@ -320,30 +316,19 @@ repo = "projects/svc"
 name = "a"
 "#;
         let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
-        let mut app = App::new(&reg, "test".to_string(), "tui-window".to_string());
+        let mut app = App::new(reg, "test".to_string(), "tui-window".to_string());
         app.mode = Mode::ConfirmClose;
         app
     }
 
     #[test]
     fn test_confirm_close_cancel_resets_mode_to_normal() {
-        use crate::registry::Registry;
         use crate::tui::input::handle_key;
         use crossterm::event::{KeyCode, KeyModifiers};
-        use std::path::PathBuf;
 
-        let toml = r#"
-[[projects]]
-name = "svc"
-short = "S"
-repo = "projects/svc"
-[[projects.worktrees]]
-name = "a"
-"#;
-        let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
         let mut app = make_app_confirm_close();
         // Press Escape to cancel the close modal.
-        handle_key(&mut app, &reg, KeyCode::Esc, KeyModifiers::NONE).unwrap();
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE).unwrap();
         assert_eq!(
             app.mode,
             Mode::Normal,
@@ -353,25 +338,14 @@ name = "a"
 
     #[test]
     fn test_confirm_close_cancel_sets_needs_full_redraw() {
-        use crate::registry::Registry;
         use crate::tui::input::handle_key;
         use crossterm::event::{KeyCode, KeyModifiers};
-        use std::path::PathBuf;
 
-        let toml = r#"
-[[projects]]
-name = "svc"
-short = "S"
-repo = "projects/svc"
-[[projects.worktrees]]
-name = "a"
-"#;
-        let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
         let mut app = make_app_confirm_close();
         app.needs_full_redraw = false;
         // Press any non-y key to cancel — should trigger a full redraw so
         // the modal ghost cells are cleared on the next frame.
-        handle_key(&mut app, &reg, KeyCode::Esc, KeyModifiers::NONE).unwrap();
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE).unwrap();
         assert!(
             app.needs_full_redraw,
             "cancelling close modal must set needs_full_redraw to clear ghost cells"
@@ -380,23 +354,12 @@ name = "a"
 
     #[test]
     fn test_confirm_close_cancel_clears_status_msg() {
-        use crate::registry::Registry;
         use crate::tui::input::handle_key;
         use crossterm::event::{KeyCode, KeyModifiers};
-        use std::path::PathBuf;
 
-        let toml = r#"
-[[projects]]
-name = "svc"
-short = "S"
-repo = "projects/svc"
-[[projects.worktrees]]
-name = "a"
-"#;
-        let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
         let mut app = make_app_confirm_close();
         app.set_status("some warning about the running agent");
-        handle_key(&mut app, &reg, KeyCode::Esc, KeyModifiers::NONE).unwrap();
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE).unwrap();
         assert!(
             app.status_msg.is_none(),
             "cancelling close modal should clear the status message"
@@ -405,20 +368,8 @@ name = "a"
 
     #[test]
     fn test_confirm_close_cancel_any_non_y_key() {
-        use crate::registry::Registry;
         use crate::tui::input::handle_key;
         use crossterm::event::{KeyCode, KeyModifiers};
-        use std::path::PathBuf;
-
-        let toml = r#"
-[[projects]]
-name = "svc"
-short = "S"
-repo = "projects/svc"
-[[projects.worktrees]]
-name = "a"
-"#;
-        let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
 
         // All of these non-y keys should cancel and set needs_full_redraw.
         for code in [
@@ -429,7 +380,7 @@ name = "a"
         ] {
             let mut app = make_app_confirm_close();
             app.needs_full_redraw = false;
-            handle_key(&mut app, &reg, code, KeyModifiers::NONE).unwrap();
+            handle_key(&mut app, code, KeyModifiers::NONE).unwrap();
             assert_eq!(app.mode, Mode::Normal, "{:?} should cancel to Normal", code);
             assert!(
                 app.needs_full_redraw,
@@ -458,7 +409,7 @@ repo = "projects/svc"
 name = "a"
 "#;
         let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
-        let mut app = App::new(&reg, "test".to_string(), "tui-window".to_string());
+        let mut app = App::new(reg, "test".to_string(), "tui-window".to_string());
         // Simulate an active phase so the 'r' key path isn't short-circuited.
         if let Some(p) = app.phases.get_mut(0) {
             *p = "dev".to_string();
@@ -507,6 +458,168 @@ name = "a"
     // Supervisor TUI repair tests (regression guards for TM-twb)
     // -------------------------------------------------------------------------
 
+    // -------------------------------------------------------------------------
+    // reload_from_registry tests (TM-c72)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_reload_from_registry_adds_new_worktree() {
+        use crate::registry::Registry;
+        use std::path::PathBuf;
+
+        let toml_one = r#"
+[[projects]]
+name = "svc"
+short = "S"
+repo = "projects/svc"
+[[projects.worktrees]]
+name = "a"
+"#;
+        let toml_two = r#"
+[[projects]]
+name = "svc"
+short = "S"
+repo = "projects/svc"
+[[projects.worktrees]]
+name = "a"
+[[projects.worktrees]]
+name = "b"
+"#;
+        let reg_one = Registry::load_from_str(toml_one, PathBuf::from("/base")).unwrap();
+        let reg_two = Registry::load_from_str(toml_two, PathBuf::from("/base")).unwrap();
+
+        let mut app = App::new(reg_one, "test".to_string(), "0".to_string());
+        assert_eq!(app.worktrees.len(), 1);
+
+        app.reload_from_registry(reg_two);
+        assert_eq!(app.worktrees.len(), 2, "worktrees should grow after reload");
+        // entries should contain two Worktree rows now.
+        let wt_count = app
+            .entries
+            .iter()
+            .filter(|e| matches!(e, crate::tui::ListEntry::Worktree { .. }))
+            .count();
+        assert_eq!(
+            wt_count, 2,
+            "entries should have 2 Worktree rows after reload"
+        );
+    }
+
+    #[test]
+    fn test_reload_from_registry_removes_worktree() {
+        use crate::registry::Registry;
+        use std::path::PathBuf;
+
+        let toml_two = r#"
+[[projects]]
+name = "svc"
+short = "S"
+repo = "projects/svc"
+[[projects.worktrees]]
+name = "a"
+[[projects.worktrees]]
+name = "b"
+"#;
+        let toml_one = r#"
+[[projects]]
+name = "svc"
+short = "S"
+repo = "projects/svc"
+[[projects.worktrees]]
+name = "a"
+"#;
+        let reg_two = Registry::load_from_str(toml_two, PathBuf::from("/base")).unwrap();
+        let reg_one = Registry::load_from_str(toml_one, PathBuf::from("/base")).unwrap();
+
+        let mut app = App::new(reg_two, "test".to_string(), "0".to_string());
+        assert_eq!(app.worktrees.len(), 2);
+
+        app.reload_from_registry(reg_one);
+        assert_eq!(
+            app.worktrees.len(),
+            1,
+            "worktrees should shrink after reload"
+        );
+        assert!(
+            app.selected().is_some(),
+            "selection should be valid after reload"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // selected_project_short tests (TM-5t5)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_selected_project_short_from_worktree_row() {
+        use crate::registry::Registry;
+        use std::path::PathBuf;
+
+        let toml = r#"
+[[projects]]
+name = "svc"
+short = "S"
+repo = "projects/svc"
+[[projects.worktrees]]
+name = "a"
+"#;
+        let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
+        let app = App::new(reg, "test".to_string(), "0".to_string());
+        // App selects the first Worktree entry on construction.
+        assert_eq!(
+            app.selected_project_short(),
+            Some("S".to_string()),
+            "should resolve project_short from selected Worktree row"
+        );
+    }
+
+    #[test]
+    fn test_selected_project_short_from_project_header() {
+        use crate::registry::Registry;
+        use std::path::PathBuf;
+
+        let toml = r#"
+[[projects]]
+name = "svc"
+short = "S"
+repo = "projects/svc"
+[[projects.worktrees]]
+name = "a"
+"#;
+        let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
+        let mut app = App::new(reg, "test".to_string(), "0".to_string());
+        // Select the ProjectHeader row (index 0 in entries).
+        app.list_state.select(Some(0));
+        assert_eq!(
+            app.selected_project_short(),
+            Some("S".to_string()),
+            "should resolve project_short from selected ProjectHeader"
+        );
+    }
+
+    #[test]
+    fn test_selected_project_short_no_selection() {
+        use crate::registry::Registry;
+        use std::path::PathBuf;
+
+        let toml = r#"
+[[projects]]
+name = "svc"
+short = "S"
+repo = "projects/svc"
+[[projects.worktrees]]
+name = "a"
+"#;
+        let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
+        let mut app = App::new(reg, "test".to_string(), "0".to_string());
+        app.list_state.select(None);
+        assert_eq!(
+            app.selected_project_short(),
+            None,
+            "should return None when nothing is selected"
+        );
+    }
+
     /// Verifies that after a successful supervisor spawn the App sets
     /// needs_full_redraw and has a status message.
     ///
@@ -528,7 +641,7 @@ repo = "projects/svc"
 name = "a"
 "#;
         let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
-        let mut app = App::new(&reg, "test".to_string(), "tui-window".to_string());
+        let mut app = App::new(reg, "test".to_string(), "tui-window".to_string());
         app.needs_full_redraw = false;
 
         // Simulate the successful supervise outcome (mirrors the Ok(()) branch

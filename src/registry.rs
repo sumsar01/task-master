@@ -79,7 +79,7 @@ pub struct Worktree {
     pub project_name: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Registry {
     pub projects: Vec<ProjectConfig>,
     pub worktrees: Vec<Worktree>,

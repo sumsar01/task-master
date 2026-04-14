@@ -34,6 +34,7 @@ pub fn render(f: &mut Frame, app: &App, t: &Theme) {
         Mode::Prompt(ActionKind::Plan) => (" Plan Task ", true),
         Mode::Prompt(ActionKind::Qa) => (" QA — Enter PR # ", true),
         Mode::Prompt(ActionKind::Send) => (" Send Message ", true),
+        Mode::Prompt(ActionKind::AddWorktree) => (" New Worktree — Enter name ", true),
         _ => return,
     };
 

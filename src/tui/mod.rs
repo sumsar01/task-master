@@ -507,6 +507,168 @@ name = "a"
     // Supervisor TUI repair tests (regression guards for TM-twb)
     // -------------------------------------------------------------------------
 
+    // -------------------------------------------------------------------------
+    // reload_from_registry tests (TM-c72)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_reload_from_registry_adds_new_worktree() {
+        use crate::registry::Registry;
+        use std::path::PathBuf;
+
+        let toml_one = r#"
+[[projects]]
+name = "svc"
+short = "S"
+repo = "projects/svc"
+[[projects.worktrees]]
+name = "a"
+"#;
+        let toml_two = r#"
+[[projects]]
+name = "svc"
+short = "S"
+repo = "projects/svc"
+[[projects.worktrees]]
+name = "a"
+[[projects.worktrees]]
+name = "b"
+"#;
+        let reg_one = Registry::load_from_str(toml_one, PathBuf::from("/base")).unwrap();
+        let reg_two = Registry::load_from_str(toml_two, PathBuf::from("/base")).unwrap();
+
+        let mut app = App::new(&reg_one, "test".to_string(), "0".to_string());
+        assert_eq!(app.worktrees.len(), 1);
+
+        app.reload_from_registry(&reg_two);
+        assert_eq!(app.worktrees.len(), 2, "worktrees should grow after reload");
+        // entries should contain two Worktree rows now.
+        let wt_count = app
+            .entries
+            .iter()
+            .filter(|e| matches!(e, crate::tui::ListEntry::Worktree { .. }))
+            .count();
+        assert_eq!(
+            wt_count, 2,
+            "entries should have 2 Worktree rows after reload"
+        );
+    }
+
+    #[test]
+    fn test_reload_from_registry_removes_worktree() {
+        use crate::registry::Registry;
+        use std::path::PathBuf;
+
+        let toml_two = r#"
+[[projects]]
+name = "svc"
+short = "S"
+repo = "projects/svc"
+[[projects.worktrees]]
+name = "a"
+[[projects.worktrees]]
+name = "b"
+"#;
+        let toml_one = r#"
+[[projects]]
+name = "svc"
+short = "S"
+repo = "projects/svc"
+[[projects.worktrees]]
+name = "a"
+"#;
+        let reg_two = Registry::load_from_str(toml_two, PathBuf::from("/base")).unwrap();
+        let reg_one = Registry::load_from_str(toml_one, PathBuf::from("/base")).unwrap();
+
+        let mut app = App::new(&reg_two, "test".to_string(), "0".to_string());
+        assert_eq!(app.worktrees.len(), 2);
+
+        app.reload_from_registry(&reg_one);
+        assert_eq!(
+            app.worktrees.len(),
+            1,
+            "worktrees should shrink after reload"
+        );
+        assert!(
+            app.selected().is_some(),
+            "selection should be valid after reload"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // selected_project_short tests (TM-5t5)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_selected_project_short_from_worktree_row() {
+        use crate::registry::Registry;
+        use std::path::PathBuf;
+
+        let toml = r#"
+[[projects]]
+name = "svc"
+short = "S"
+repo = "projects/svc"
+[[projects.worktrees]]
+name = "a"
+"#;
+        let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
+        let app = App::new(&reg, "test".to_string(), "0".to_string());
+        // App selects the first Worktree entry on construction.
+        assert_eq!(
+            app.selected_project_short(),
+            Some("S".to_string()),
+            "should resolve project_short from selected Worktree row"
+        );
+    }
+
+    #[test]
+    fn test_selected_project_short_from_project_header() {
+        use crate::registry::Registry;
+        use std::path::PathBuf;
+
+        let toml = r#"
+[[projects]]
+name = "svc"
+short = "S"
+repo = "projects/svc"
+[[projects.worktrees]]
+name = "a"
+"#;
+        let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
+        let mut app = App::new(&reg, "test".to_string(), "0".to_string());
+        // Select the ProjectHeader row (index 0 in entries).
+        app.list_state.select(Some(0));
+        assert_eq!(
+            app.selected_project_short(),
+            Some("S".to_string()),
+            "should resolve project_short from selected ProjectHeader"
+        );
+    }
+
+    #[test]
+    fn test_selected_project_short_no_selection() {
+        use crate::registry::Registry;
+        use std::path::PathBuf;
+
+        let toml = r#"
+[[projects]]
+name = "svc"
+short = "S"
+repo = "projects/svc"
+[[projects.worktrees]]
+name = "a"
+"#;
+        let reg = Registry::load_from_str(toml, PathBuf::from("/base")).unwrap();
+        let mut app = App::new(&reg, "test".to_string(), "0".to_string());
+        app.list_state.select(None);
+        assert_eq!(
+            app.selected_project_short(),
+            None,
+            "should return None when nothing is selected"
+        );
+    }
+
     /// Verifies that after a successful supervisor spawn the App sets
     /// needs_full_redraw and has a status message.
     ///

@@ -99,6 +99,7 @@ pub fn handle_key(
         Mode::Prompt(kind) => handle_prompt(app, registry, code, modifiers, kind.clone()),
         Mode::ForceConfirm => handle_force_confirm(app, registry, code),
         Mode::ConfirmClose => handle_confirm_close(app, code),
+        Mode::ConfirmRemoveWorktree => handle_confirm_remove_worktree(app, registry, code),
     }
 }
 
@@ -318,6 +319,23 @@ fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()
             }
             app.mode = Mode::ConfirmClose;
         }
+        // ── Add ephemeral worktree ────────────────────────────────────────────
+        KeyCode::Char('N') if !is_burst => {
+            if app.selected_project_short().is_none() {
+                app.set_status("Select a project or worktree first (use j/k to navigate).");
+                return Ok(());
+            }
+            app.input_buf.clear();
+            app.cursor_pos = 0;
+            app.mode = Mode::Prompt(ActionKind::AddWorktree);
+        }
+        // ── Remove worktree ───────────────────────────────────────────────────
+        KeyCode::Char('D') if !is_burst => {
+            if !app.require_worktree_selected() {
+                return Ok(());
+            }
+            app.mode = Mode::ConfirmRemoveWorktree;
+        }
         _ => {}
     }
     Ok(())
@@ -486,6 +504,21 @@ fn handle_confirm_close(app: &mut App, code: KeyCode) -> Result<()> {
             // bordered box cells are cleared — ratatui's incremental diff
             // renderer can leave ghost cells if the terminal state was
             // disturbed while the overlay was visible.
+            app.mode = Mode::Normal;
+            app.status_msg = None;
+            app.needs_full_redraw = true;
+        }
+    }
+    Ok(())
+}
+
+fn handle_confirm_remove_worktree(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()> {
+    match code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            super::actions::execute_remove_worktree(app, registry)?;
+        }
+        _ => {
+            // Any other key cancels.
             app.mode = Mode::Normal;
             app.status_msg = None;
             app.needs_full_redraw = true;

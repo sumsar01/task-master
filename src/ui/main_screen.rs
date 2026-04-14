@@ -71,6 +71,8 @@ fn render_header(f: &mut Frame, area: Rect, t: &Theme) {
         ("r", "reset"),
         ("c", "close"),
         ("a", "attach"),
+        ("N", "new wt"),
+        ("D", "remove wt"),
         ("v", "supervise"),
         ("d", "detail"),
         ("w", "preview"),
@@ -98,7 +100,7 @@ fn render_header(f: &mut Frame, area: Rect, t: &Theme) {
 /// Number of lines the Actions panel body occupies (excluding its border).
 /// Keep in sync with `render_actions` content. Border adds 2, so the block
 /// height passed to `Constraint::Length` is ACTIONS_LINES + 2.
-const ACTIONS_LINES: u16 = 19;
+const ACTIONS_LINES: u16 = 21;
 
 /// Fixed height of the detail pane when it shares the right column with
 /// another pane (preview).  Border adds 2, so actual block height = DETAIL_LINES + 2.
@@ -266,6 +268,9 @@ fn render_actions(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
     lines.push(action_line('r', "reset window", has_wt, !active, t));
     lines.push(action_line('a', "attach", has_wt, !active, t));
     lines.push(action_line('c', "close window", has_wt, false, t));
+    lines.push(Line::from(""));
+    lines.push(action_line('N', "new worktree", has_wt, false, t));
+    lines.push(action_line('D', "remove worktree", has_wt, !has_wt, t));
     lines.push(Line::from(""));
     lines.push(action_line('v', "supervise", true, false, t));
     lines.push(Line::from(""));
@@ -480,11 +485,16 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
             " Send message…  Esc to cancel".to_string(),
             t.text_dim_style(),
         ),
+        Mode::Prompt(crate::tui::ActionKind::AddWorktree) => (
+            " New worktree name…  Esc to cancel".to_string(),
+            t.text_dim_style(),
+        ),
         Mode::ForceConfirm => (
             " Press Enter to force-spawn (discards uncommitted changes), Esc to cancel".to_string(),
             t.text_style().fg(t.phase_error),
         ),
         Mode::ConfirmClose => (String::new(), t.text_dim_style()),
+        Mode::ConfirmRemoveWorktree => (String::new(), t.text_dim_style()),
         Mode::Normal => {
             if let Some(msg) = app.current_status() {
                 (format!(" {}", msg), t.text_dim_style())

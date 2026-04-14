@@ -51,6 +51,8 @@ pub enum ActionKind {
     Plan,
     Qa,
     Send,
+    /// User typed a new worktree name; Enter calls execute_add_worktree.
+    AddWorktree,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +63,8 @@ pub enum Mode {
     ForceConfirm,
     /// Confirm-close modal: user pressed 'c', waiting for 'y' or any other key.
     ConfirmClose,
+    /// Confirm-remove-worktree modal: user pressed 'D', waiting for 'y' or any other key.
+    ConfirmRemoveWorktree,
 }
 
 pub struct App {
@@ -676,6 +680,35 @@ impl App {
         self.needs_full_redraw = true;
     }
 
+    /// Reload in-memory worktree/project state from a freshly-loaded registry.
+    ///
+    /// Called after `cmd_add_worktree` or `cmd_remove_worktree` mutates
+    /// `task-master.toml` on disk.  Rebuilds `entries` and resizes/resets
+    /// derivative caches while preserving UI state (theme, mode, history, etc.).
+    ///
+    /// After calling this, `refresh_phases()` should be called so the phase
+    /// column reflects any windows that may have appeared or disappeared.
+    pub fn reload_from_registry(&mut self, new_registry: &crate::registry::Registry) {
+        self.worktrees = new_registry.worktrees.clone();
+        self.projects = new_registry.projects.clone();
+
+        // Resize phases vec to match new worktree count; fill new slots with '?'.
+        self.phases.resize(self.worktrees.len(), "?".to_string());
+
+        // Invalidate derived caches — indices may have shifted.
+        self.stats_cache.clear();
+        self.last_stats_idx = None;
+        self.last_preview_idx = None;
+        self.last_detail_idx = None;
+        self.preview_lines.clear();
+        self.detail_lines.clear();
+
+        // Rebuild visual entries.  rebuild_entries tries to keep the cursor on
+        // the same worktree_idx; if that index no longer exists (e.g. after a
+        // remove), it falls back to the nearest visible row.
+        self.rebuild_entries();
+    }
+
     /// Guard for keyboard actions that require a worktree to be selected.
     ///
     /// If no worktree row is currently selected, sets a status message and
@@ -692,6 +725,25 @@ impl App {
             false
         } else {
             true
+        }
+    }
+
+    /// Resolve the project short name from the currently selected entry.
+    ///
+    /// Returns `Some(project_short)` when:
+    /// - A `Worktree` row is selected → use that worktree's `project_short`.
+    /// - A `ProjectHeader` row is selected → use that project's `short` name.
+    ///
+    /// Returns `None` when a `GroupHeader`, `EmptyProject`, or nothing is selected,
+    /// i.e. when there is no unambiguous project context.
+    pub fn selected_project_short(&self) -> Option<String> {
+        let idx = self.selected()?;
+        match self.entries.get(idx)? {
+            ListEntry::Worktree { wt, .. } => Some(wt.project_short.clone()),
+            ListEntry::ProjectHeader { project_idx, .. } => {
+                self.projects.get(*project_idx).map(|p| p.short.clone())
+            }
+            _ => None,
         }
     }
 }

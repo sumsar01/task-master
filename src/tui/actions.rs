@@ -23,6 +23,7 @@ pub fn execute_action(
         ActionKind::Plan => execute_plan(app, registry),
         ActionKind::Qa => execute_qa(app, registry),
         ActionKind::Send => execute_send(app, registry),
+        ActionKind::AddWorktree => execute_add_worktree(app, registry),
     }
 }
 
@@ -161,8 +162,100 @@ pub fn execute_send(app: &mut App, registry: &Registry) -> Result<()> {
     Ok(())
 }
 
-/// Re-select the TUI window after a tmux operation that may have stolen focus.
+/// Create a new ephemeral git worktree for the currently selected project.
 ///
+/// The worktree name is read from `app.input_buf`. The project is inferred
+/// from the selected entry (Worktree row → its project; ProjectHeader → that
+/// project). On success the registry is reloaded from disk so the new row
+/// appears immediately.
+pub fn execute_add_worktree(app: &mut App, registry: &Registry) -> Result<()> {
+    let name = app.input_buf.trim().to_string();
+    if name.is_empty() {
+        app.set_status("Worktree name cannot be empty.");
+        return Ok(());
+    }
+
+    let project_short = match app.selected_project_short() {
+        Some(s) => s,
+        None => {
+            app.set_status("Select a project or worktree first (use j/k to navigate).");
+            return Ok(());
+        }
+    };
+
+    match crate::worktree::cmd_add_worktree(
+        registry,
+        &registry.base_dir,
+        &project_short,
+        &name,
+        None,
+    ) {
+        Ok(_) => {
+            // Reload the registry from disk so the new worktree is visible.
+            match crate::registry::Registry::load(registry.base_dir.clone()) {
+                Ok(new_reg) => app.reload_from_registry(&new_reg),
+                Err(e) => {
+                    // Non-fatal: the worktree was added but we couldn't
+                    // reload — show a warning and let the user restart.
+                    app.set_status(format!("Added worktree but failed to reload config: {}", e));
+                    app.reset_input();
+                    return Ok(());
+                }
+            }
+            refocus_tui_window(&app.session, &app.tui_window_id);
+            app.set_status(format!(
+                "Added {}-{}. Press s to spawn an agent.",
+                project_short, name
+            ));
+            app.reset_input();
+            app.refresh_phases();
+        }
+        Err(e) => {
+            app.set_status(format!("Add worktree failed: {}", e));
+            app.reset_input();
+        }
+    }
+    Ok(())
+}
+
+/// Remove the currently selected git worktree (runs `git worktree remove` and
+/// removes the entry from `task-master.toml`).  On success the registry is
+/// reloaded so the row disappears immediately.
+pub fn execute_remove_worktree(app: &mut App, registry: &Registry) -> Result<()> {
+    let window_name = match app.selected_worktree() {
+        Some(wt) => wt.window_name.clone(),
+        None => return Ok(()),
+    };
+
+    match crate::worktree::cmd_remove_worktree(registry, &registry.base_dir, &window_name, false) {
+        Ok(()) => {
+            // Reload the registry from disk so the removed row disappears.
+            match crate::registry::Registry::load(registry.base_dir.clone()) {
+                Ok(new_reg) => app.reload_from_registry(&new_reg),
+                Err(e) => {
+                    app.set_status(format!(
+                        "Removed worktree but failed to reload config: {}",
+                        e
+                    ));
+                    app.mode = Mode::Normal;
+                    app.needs_full_redraw = true;
+                    return Ok(());
+                }
+            }
+            app.mode = Mode::Normal;
+            app.set_status(format!("Removed {}.", window_name));
+            app.needs_full_redraw = true;
+            app.refresh_phases();
+        }
+        Err(e) => {
+            app.mode = Mode::Normal;
+            app.set_status(format!("Remove worktree failed: {}", e));
+        }
+    }
+    Ok(())
+}
+
+/// Re-select the TUI window after a tmux operation that may have stolen focus.///
 /// Uses the stable `#{window_id}` (@N) rather than the window name, so that a
 /// worktree whose base name collides with the TUI window's name can never cause
 /// the wrong window to be selected.

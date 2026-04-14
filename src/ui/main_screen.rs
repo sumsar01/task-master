@@ -71,9 +71,10 @@ fn render_header(f: &mut Frame, area: Rect, t: &Theme) {
         ("r", "reset"),
         ("c", "close"),
         ("a", "attach"),
-        ("N", "new wt"),
-        ("D", "remove wt"),
         ("v", "supervise"),
+        ("N", "new worktree"),
+        ("D", "rm worktree"),
+        ("P", "add project"),
         ("d", "detail"),
         ("w", "preview"),
         ("t", "theme"),
@@ -100,7 +101,7 @@ fn render_header(f: &mut Frame, area: Rect, t: &Theme) {
 /// Number of lines the Actions panel body occupies (excluding its border).
 /// Keep in sync with `render_actions` content. Border adds 2, so the block
 /// height passed to `Constraint::Length` is ACTIONS_LINES + 2.
-const ACTIONS_LINES: u16 = 21;
+const ACTIONS_LINES: u16 = 23;
 
 /// Fixed height of the detail pane when it shares the right column with
 /// another pane (preview).  Border adds 2, so actual block height = DETAIL_LINES + 2.
@@ -272,6 +273,7 @@ fn render_actions(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
     lines.push(action_line('N', "new worktree", has_wt, false, t));
     lines.push(action_line('D', "remove worktree", has_wt, !has_wt, t));
     lines.push(Line::from(""));
+    lines.push(action_line('P', "add project", true, false, t));
     lines.push(action_line('v', "supervise", true, false, t));
     lines.push(Line::from(""));
 
@@ -489,6 +491,20 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
             " New worktree name…  Esc to cancel".to_string(),
             t.text_dim_style(),
         ),
+        Mode::Prompt(crate::tui::ActionKind::AddProject) => {
+            use crate::tui::AddProjectStep;
+            let hint = match &app.add_project_step {
+                Some(AddProjectStep::Name) => " Add project  ·  Enter full name  ·  Esc to cancel",
+                Some(AddProjectStep::Short) => {
+                    " Add project  ·  Enter short name (e.g. WIS)  ·  Esc to cancel"
+                }
+                Some(AddProjectStep::Url) => {
+                    " Add project  ·  Enter git repo URL  ·  Esc to cancel"
+                }
+                None => " Add project…  Esc to cancel",
+            };
+            (hint.to_string(), t.text_dim_style())
+        }
         Mode::ForceConfirm => (
             " Press Enter to force-spawn (discards uncommitted changes), Esc to cancel".to_string(),
             t.text_style().fg(t.phase_error),

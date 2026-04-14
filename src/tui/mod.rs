@@ -3,7 +3,7 @@ mod app;
 mod input;
 
 // Re-export everything external callers depend on.
-pub use app::{ActionKind, App, ListEntry, Mode};
+pub use app::{ActionKind, AddProjectStep, App, ListEntry, Mode};
 
 use crate::registry::Registry;
 use crate::tmux;

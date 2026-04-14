@@ -56,6 +56,19 @@ pub enum ActionKind {
     Send,
     /// User typed a new worktree name; Enter calls execute_add_worktree.
     AddWorktree,
+    /// Multi-step prompt for adding a new project (name → short → url).
+    AddProject,
+}
+
+/// Tracks which input step the add-project flow is on.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AddProjectStep {
+    /// Step 1: collecting the full project name (e.g. "warehouse-integration-service").
+    Name,
+    /// Step 2: collecting the short prefix (e.g. "WIS").
+    Short,
+    /// Step 3: collecting the git repo URL to clone.
+    Url,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -166,6 +179,15 @@ pub struct App {
     /// cells, and a tmux window-switch round-trip can leave the terminal state
     /// stale enough that the diff misses cells that need clearing.
     pub needs_full_redraw: bool,
+
+    // ── Add-project multi-step flow ───────────────────────────────────────────
+    /// Which step of the add-project flow we are currently collecting input for.
+    /// `None` when no add-project flow is active.
+    pub add_project_step: Option<AddProjectStep>,
+    /// Partial result: project full name collected in step 1.
+    pub pending_project_name: String,
+    /// Partial result: project short name collected in step 2.
+    pub pending_project_short: String,
 }
 
 impl App {
@@ -229,6 +251,9 @@ impl App {
             history_idx: None,
             history_draft: String::new(),
             needs_full_redraw: false,
+            add_project_step: None,
+            pending_project_name: String::new(),
+            pending_project_short: String::new(),
         }
     }
 
@@ -686,6 +711,10 @@ impl App {
         self.cursor_pos = 0;
         self.history_idx = None;
         self.history_draft.clear();
+        // Clear any in-progress add-project flow so stale state can never leak.
+        self.add_project_step = None;
+        self.pending_project_name.clear();
+        self.pending_project_short.clear();
         // Force a full repaint on the next frame so the prompt overlay cells
         // are cleared even if ratatui's diff renderer would otherwise skip them
         // (e.g. after a tmux window-switch leaves the terminal state stale).

@@ -1,5 +1,5 @@
 use super::actions::execute_close;
-use super::app::{ActionKind, App, ListEntry, Mode};
+use super::app::{ActionKind, AddProjectStep, App, ListEntry, Mode};
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use std::time::Duration;
@@ -330,6 +330,14 @@ fn handle_normal(app: &mut App, code: KeyCode) -> Result<()> {
                 return Ok(());
             }
             app.mode = Mode::ConfirmRemoveWorktree;
+        }
+        // ── Add project ───────────────────────────────────────────────────────
+        KeyCode::Char('P') if !is_burst => {
+            app.input_buf.clear();
+            app.cursor_pos = 0;
+            app.add_project_step = Some(AddProjectStep::Name);
+            app.mode = Mode::Prompt(ActionKind::AddProject);
+            app.set_status("Enter project full name (e.g. warehouse-integration-service):");
         }
         _ => {}
     }

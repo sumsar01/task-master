@@ -1,4 +1,4 @@
-use super::app::{ActionKind, App, Mode};
+use super::app::{ActionKind, AddProjectStep, App, Mode};
 use crate::tmux;
 use anyhow::Result;
 
@@ -18,6 +18,7 @@ pub fn execute_action(app: &mut App, kind: &ActionKind, force: bool) -> Result<(
         ActionKind::Qa => execute_qa(app),
         ActionKind::Send => execute_send(app),
         ActionKind::AddWorktree => execute_add_worktree(app),
+        ActionKind::AddProject => execute_add_project(app),
     }
 }
 
@@ -252,6 +253,100 @@ pub fn execute_remove_worktree(app: &mut App) -> Result<()> {
             app.needs_full_redraw = true;
         }
     }
+    Ok(())
+}
+
+/// Add a new project via a three-step prompt sequence (name → short → url).
+///
+/// Called on each Enter press while `Mode::Prompt(ActionKind::AddProject)` is
+/// active.  The current step is tracked in `app.add_project_step`:
+///
+/// - `Name`  → validates & stores `app.input_buf` into `app.pending_project_name`,
+///             advances step to `Short`, updates status hint.
+/// - `Short` → validates & stores into `app.pending_project_short`,
+///             advances to `Url`, updates status hint.
+/// - `Url`   → runs `cmd_add_project`, reloads registry on success.
+///
+/// On success the flow resets (`add_project_step = None`, pending fields
+/// cleared).  On any error the flow is cancelled (same reset) and the
+/// error message is shown in the status bar.
+pub fn execute_add_project(app: &mut App) -> Result<()> {
+    let step = match app.add_project_step.clone() {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
+    let input = app.input_buf.trim().to_string();
+
+    match step {
+        AddProjectStep::Name => {
+            if input.is_empty() {
+                app.set_status("Project name cannot be empty.");
+                return Ok(());
+            }
+            app.pending_project_name = input;
+            app.input_buf.clear();
+            app.cursor_pos = 0;
+            app.add_project_step = Some(AddProjectStep::Short);
+            app.set_status(format!(
+                "Project '{}' — enter short name (e.g. WIS):",
+                app.pending_project_name
+            ));
+        }
+        AddProjectStep::Short => {
+            if input.is_empty() {
+                app.set_status("Short name cannot be empty.");
+                return Ok(());
+            }
+            app.pending_project_short = input;
+            app.input_buf.clear();
+            app.cursor_pos = 0;
+            app.add_project_step = Some(AddProjectStep::Url);
+            app.set_status(format!(
+                "'{}' ({}) — enter git repo URL:",
+                app.pending_project_name, app.pending_project_short
+            ));
+        }
+        AddProjectStep::Url => {
+            if input.is_empty() {
+                app.set_status("Repo URL cannot be empty.");
+                return Ok(());
+            }
+            let name = app.pending_project_name.clone();
+            let short = app.pending_project_short.clone();
+            let url = input;
+            let base_dir = app.registry.base_dir.clone();
+
+            match crate::cmd_add_project(&base_dir, &name, &short, &url) {
+                Ok(()) => {
+                    // Reload the registry so the new project header appears
+                    // immediately without restarting the TUI.
+                    match crate::registry::Registry::load(base_dir) {
+                        Ok(new_reg) => app.reload_from_registry(new_reg),
+                        Err(e) => {
+                            app.set_status(format!(
+                                "Added project but failed to reload config: {}",
+                                e
+                            ));
+                            app.reset_input();
+                            return Ok(());
+                        }
+                    }
+                    app.set_status(format!(
+                        "Added project {} ({}). Press N to add a worktree.",
+                        name, short
+                    ));
+                    app.reset_input();
+                    app.refresh_phases();
+                }
+                Err(e) => {
+                    app.set_status(format!("Add project failed: {}", e));
+                    app.reset_input();
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 

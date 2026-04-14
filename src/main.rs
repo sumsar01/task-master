@@ -272,7 +272,7 @@ fn cmd_list(registry: &Registry) -> Result<()> {
 // add-project
 // ---------------------------------------------------------------------------
 
-fn cmd_add_project(base_dir: &PathBuf, name: &str, short: &str, url: &str) -> Result<()> {
+pub fn cmd_add_project(base_dir: &PathBuf, name: &str, short: &str, url: &str) -> Result<()> {
     // Check short name not already taken
     let config_path = base_dir.join("task-master.toml");
     if config_path.exists() {

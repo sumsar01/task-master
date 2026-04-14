@@ -281,6 +281,47 @@ Read the pane. Determine which of these is true:
 
 ---
 
+## Step 2b — Auto-cleanup merged ephemeral worktrees
+
+After finishing the per-window checks in Step 2, scan for ephemeral worktrees that are
+ready to be cleaned up.
+
+1. From the TOML you read at startup, collect all worktrees where `ephemeral = true`.
+
+2. For each such worktree, check its state:
+   ```bash
+   _branch=$(git -C <worktree-abs-path> rev-parse --abbrev-ref HEAD 2>/dev/null)
+   _state=$(gh pr list --head "$_branch" --json state --jq '.[0].state' 2>/dev/null)
+   ```
+   - If `$_state` is `MERGED` or `CLOSED`, this worktree is done.
+   - If `$_branch` is empty (directory may already be gone), treat as done.
+   - If `$_state` is `OPEN`, skip — the agent is still working.
+   - If `gh` is unavailable, fall back to:
+     ```bash
+     git -C <repo_path> branch --merged master
+     git -C <repo_path> branch --merged main
+     ```
+     If the branch appears in the output, treat as merged.
+
+3. **Only remove worktrees whose tmux window (if any) is in a terminal or absent state.**
+   Terminal states are: `:review`, `:blocked`, `:dev-stalled`, `:qa-stalled`, no window.
+   **Do NOT remove a worktree whose window is in an active state** (`:dev`, `:qa`, `:plan`, `:e2e`).
+
+4. For each worktree that is both done AND in a safe state:
+   ```bash
+   $TASK_MASTER cleanup --merged --force
+   ```
+   The `--force` flag is required because the supervisor is non-interactive.
+
+5. Log what was cleaned up, e.g.:
+   `MSG-spruce-7f3a: ephemeral worktree merged, ran cleanup --merged --force`
+
+If `$TASK_MASTER cleanup --help` exits non-zero (cleanup subcommand not yet available),
+skip this step entirely and log:
+   `[Step 2b] cleanup subcommand not available — skipping ephemeral cleanup`
+
+---
+
 ## Step 3 — Print summary and exit
 
 ```

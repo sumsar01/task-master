@@ -598,7 +598,7 @@ pub fn cmd_add_worktree(
     let config_path = base_dir.join("task-master.toml");
     let contents = std::fs::read_to_string(&config_path)?;
 
-    let new_toml = append_worktree_to_toml(&contents, project_short, worktree_name)
+    let new_toml = append_worktree_to_toml(&contents, project_short, worktree_name, false)
         .context("Failed to update task-master.toml")?;
     std::fs::write(&config_path, new_toml)?;
 
@@ -707,6 +707,152 @@ pub fn cmd_add_worktree(
 }
 
 // ---------------------------------------------------------------------------
+// create-ephemeral-worktree (internal helper for spawn --ephemeral)
+// ---------------------------------------------------------------------------
+
+/// Create a new ephemeral worktree for `project_short`, register it in the config
+/// with `ephemeral = true`, and return the resolved `(window_name, abs_path)`.
+///
+/// Performs all the same setup steps as `cmd_add_worktree` (git hooks, beads,
+/// serena, agent configs) but writes `ephemeral = true` to the TOML entry and
+/// creates a new branch named `<branch_prefix><worktree_name>`.
+///
+/// Does NOT reset to master (the branch is brand-new — there is nothing to reset).
+/// The caller is responsible for spawning the tmux window afterwards.
+pub fn create_ephemeral_worktree(
+    registry: &Registry,
+    base_dir: &PathBuf,
+    project_short: &str,
+    worktree_name: &str,
+    branch_name: &str,
+) -> Result<(String, std::path::PathBuf)> {
+    let project = registry.find_project(project_short).with_context(|| {
+        format!(
+            "Project '{}' not found. Run `task-master list` to see available projects.",
+            project_short
+        )
+    })?;
+
+    let window_name = format!("{}-{}", project.short, worktree_name);
+    registry.assert_window_name_free(&window_name)?;
+
+    let repo_path = base_dir.join(&project.repo);
+    let worktree_path = repo_path.join(worktree_name);
+
+    if worktree_path.exists() {
+        bail!("Directory already exists: {}", worktree_path.display());
+    }
+
+    // Create the worktree on a new branch: git worktree add <path> -b <branch>
+    let worktree_path_str = worktree_path.to_string_lossy().to_string();
+    info!(
+        "Running: git -C {} worktree add {} -b {}",
+        repo_path.display(),
+        worktree_path_str,
+        branch_name
+    );
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&repo_path)
+        .args(["worktree", "add", &worktree_path_str, "-b", branch_name])
+        .output()
+        .context("Failed to run git worktree add")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git worktree add failed: {}", stderr.trim());
+    }
+
+    // Append to task-master.toml with ephemeral = true.
+    let config_path = base_dir.join("task-master.toml");
+    let contents = std::fs::read_to_string(&config_path)?;
+    let new_toml = append_worktree_to_toml(&contents, project_short, worktree_name, true)
+        .context("Failed to update task-master.toml")?;
+    std::fs::write(&config_path, new_toml)?;
+
+    info!(
+        "Created ephemeral worktree {} on branch {}",
+        window_name, branch_name
+    );
+
+    // Apply per-project git identity override (non-fatal).
+    match write_git_identity_to_repo(
+        &repo_path,
+        project.git_name.as_deref(),
+        project.git_email.as_deref(),
+    ) {
+        Ok(()) => {}
+        Err(e) => eprintln!(
+            "Warning: could not set git identity for {}: {}",
+            window_name, e
+        ),
+    }
+
+    // Install QA post-push hook (non-fatal).
+    match hooks::install_hook_for_single(&worktree_path, project_short) {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!(
+                "Warning: could not install QA hook for {}: {}",
+                window_name, e
+            );
+            eprintln!("Run `task-master install-qa-hooks` manually later.");
+        }
+    }
+
+    // Set up beads redirect (non-fatal).
+    let repo_beads = repo_path.join(".beads");
+    if !repo_beads.is_dir() {
+        match init_beads_in_repo(&repo_path, project_short) {
+            Ok(()) => {}
+            Err(e) => eprintln!(
+                "Warning: could not run bd init for {}: {}. \
+                 Run `bd init --prefix {}` manually in '{}'.",
+                window_name,
+                e,
+                project_short,
+                repo_path.display()
+            ),
+        }
+    }
+    match write_beads_redirect(&worktree_path) {
+        Ok(()) => {}
+        Err(e) => eprintln!(
+            "Warning: could not write .beads/redirect for {}: {}",
+            window_name, e
+        ),
+    }
+
+    // Set up serena project.yml (non-fatal).
+    match write_serena_project_yml(&worktree_path, worktree_name, &project.language) {
+        Ok(()) => {}
+        Err(e) => eprintln!(
+            "Warning: could not write .serena/project.yml for {}: {}",
+            window_name, e
+        ),
+    }
+    match register_in_serena_config(&worktree_path) {
+        Ok(()) => {}
+        Err(e) => eprintln!(
+            "Warning: could not register {} in serena_config.yml: {}",
+            window_name, e
+        ),
+    }
+
+    // Install opencode agent configs (non-fatal).
+    match install_agent_configs(base_dir, &worktree_path) {
+        Ok(()) => {}
+        Err(e) => eprintln!(
+            "Warning: could not install agent configs for {}: {}. \
+             Run `task-master install-agent-configs` manually later.",
+            window_name, e
+        ),
+    }
+
+    Ok((window_name, worktree_path))
+}
+
+// ---------------------------------------------------------------------------
 // remove-worktree
 // ---------------------------------------------------------------------------
 
@@ -715,6 +861,7 @@ pub fn cmd_remove_worktree(
     base_dir: &PathBuf,
     window_name: &str,
     force: bool,
+    keep_branch: bool,
 ) -> Result<()> {
     let worktree = registry.require_worktree(window_name)?;
     let window_base = tmux::base_window_name(window_name);
@@ -730,13 +877,36 @@ pub fn cmd_remove_worktree(
         }
     }
 
-    // Run `git worktree remove [--force] <path>` from the bare repo root.
-    // The bare repo is `base_dir/<project.repo>`.
     let project = registry
         .find_project(&worktree.project_short)
         .with_context(|| format!("Project '{}' not found", worktree.project_short))?;
     let repo_path = base_dir.join(&project.repo);
 
+    // Determine the current branch BEFORE removing the worktree.
+    let branch = if !keep_branch && worktree.abs_path.exists() {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&worktree.abs_path)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => {
+                let b = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                // Only delete feature branches (not master/main/HEAD).
+                if b == "master" || b == "main" || b == "HEAD" {
+                    None
+                } else {
+                    Some(b)
+                }
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    // Run `git worktree remove [--force] <path>` from the bare repo root.
+    // The bare repo is `base_dir/<project.repo>`.
     let mut git_args = vec!["worktree", "remove"];
     if force {
         git_args.push("--force");
@@ -761,6 +931,38 @@ pub fn cmd_remove_worktree(
             .trim()
             .to_string();
         bail!("git worktree remove failed: {}", stderr);
+    }
+
+    // Delete the remote branch (non-fatal).
+    if let Some(ref b) = branch {
+        let push_out = Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["push", "origin", "--delete", b])
+            .output();
+        match push_out {
+            Ok(o) if o.status.success() => {
+                info!("Deleted remote branch '{}'.", b);
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                info!(
+                    "Remote branch delete for '{}' failed (may already be gone): {}",
+                    b,
+                    stderr.trim()
+                );
+            }
+            Err(e) => {
+                info!("Could not run git push origin --delete '{}': {}", b, e);
+            }
+        }
+
+        // Delete the local branch from the bare repo (non-fatal).
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["branch", "-d", b])
+            .output();
     }
 
     // Remove the entry from task-master.toml.
@@ -794,6 +996,7 @@ pub fn append_worktree_to_toml(
     toml_str: &str,
     project_short: &str,
     worktree_name: &str,
+    ephemeral: bool,
 ) -> Result<String> {
     let mut doc = toml_str
         .parse::<DocumentMut>()
@@ -821,6 +1024,9 @@ pub fn append_worktree_to_toml(
 
     let mut new_wt = Table::new();
     new_wt.insert("name", value(worktree_name));
+    if ephemeral {
+        new_wt.insert("ephemeral", value(true));
+    }
     worktrees.push(new_wt);
 
     Ok(doc.to_string())
@@ -849,7 +1055,7 @@ name = "olive"
 
     #[test]
     fn test_append_worktree_adds_new_entry() {
-        let result = append_worktree_to_toml(BASE_TOML, "WIS", "cedar").unwrap();
+        let result = append_worktree_to_toml(BASE_TOML, "WIS", "cedar", false).unwrap();
         // The new worktree must appear in the output.
         assert!(result.contains("cedar"), "expected 'cedar' in:\n{}", result);
         // The existing worktree must still be there.
@@ -862,7 +1068,7 @@ name = "olive"
 
     #[test]
     fn test_append_worktree_is_valid_toml() {
-        let result = append_worktree_to_toml(BASE_TOML, "WIS", "cedar").unwrap();
+        let result = append_worktree_to_toml(BASE_TOML, "WIS", "cedar", false).unwrap();
         // Round-trip: must parse without error and contain both worktrees.
         let reg =
             registry::Registry::load_from_str(&result, std::path::PathBuf::from("/base")).unwrap();
@@ -878,13 +1084,13 @@ name = "olive"
     #[test]
     fn test_append_worktree_case_insensitive_project_match() {
         // "wis" should match the project with short = "WIS".
-        let result = append_worktree_to_toml(BASE_TOML, "wis", "birch").unwrap();
+        let result = append_worktree_to_toml(BASE_TOML, "wis", "birch", false).unwrap();
         assert!(result.contains("birch"));
     }
 
     #[test]
     fn test_append_worktree_unknown_project_returns_error() {
-        let err = append_worktree_to_toml(BASE_TOML, "XYZ", "branch").unwrap_err();
+        let err = append_worktree_to_toml(BASE_TOML, "XYZ", "branch", false).unwrap_err();
         assert!(err.to_string().contains("XYZ"));
     }
 
@@ -895,7 +1101,7 @@ name = "fresh-service"
 short = "FS"
 repo = "projects/fresh-service"
 "#;
-        let result = append_worktree_to_toml(toml, "FS", "main").unwrap();
+        let result = append_worktree_to_toml(toml, "FS", "main", false).unwrap();
         assert!(result.contains("main"));
         // Validate it is parseable.
         let reg =
@@ -919,7 +1125,7 @@ name = "beta"
 short = "B"
 repo = "projects/beta"
 "#;
-        let result = append_worktree_to_toml(toml, "B", "new-branch").unwrap();
+        let result = append_worktree_to_toml(toml, "B", "new-branch", false).unwrap();
         let reg =
             registry::Registry::load_from_str(&result, std::path::PathBuf::from("/base")).unwrap();
         let names: Vec<&str> = reg
@@ -942,8 +1148,39 @@ repo = "projects/beta"
     fn test_append_worktree_preserves_original_formatting() {
         // Comments and blank lines that toml_edit preserves should not be clobbered.
         let toml = "# top comment\n".to_string() + BASE_TOML;
-        let result = append_worktree_to_toml(&toml, "WIS", "branch").unwrap();
+        let result = append_worktree_to_toml(&toml, "WIS", "branch", false).unwrap();
         assert!(result.starts_with("# top comment\n"), "comment was lost");
+    }
+
+    #[test]
+    fn test_append_worktree_ephemeral_true_writes_flag() {
+        let result = append_worktree_to_toml(BASE_TOML, "WIS", "spruce-7f3a", true).unwrap();
+        assert!(
+            result.contains("spruce-7f3a"),
+            "worktree name should appear in output"
+        );
+        assert!(
+            result.contains("ephemeral = true"),
+            "ephemeral = true should be written:\n{}",
+            result
+        );
+        // Parse round-trip to verify the flag is actually loadable.
+        let reg =
+            registry::Registry::load_from_str(&result, std::path::PathBuf::from("/base")).unwrap();
+        let wt = reg.find_worktree("WIS-spruce-7f3a").unwrap();
+        assert!(wt.ephemeral, "ephemeral flag should round-trip as true");
+    }
+
+    #[test]
+    fn test_append_worktree_ephemeral_false_omits_flag() {
+        // When ephemeral=false the key should not appear in the TOML to keep config clean.
+        let result = append_worktree_to_toml(BASE_TOML, "WIS", "cedar", false).unwrap();
+        // The "ephemeral = true" line must NOT appear for a non-ephemeral worktree.
+        assert!(
+            !result.contains("ephemeral = true"),
+            "ephemeral = true should not appear for non-ephemeral worktree:\n{}",
+            result
+        );
     }
 
     // -------------------------------------------------------------------------

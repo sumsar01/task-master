@@ -216,7 +216,8 @@ pub fn execute_remove_worktree(app: &mut App) -> Result<()> {
     };
 
     let base_dir = app.registry.base_dir.clone();
-    match crate::worktree::cmd_remove_worktree(&app.registry, &base_dir, &window_name, false) {
+    match crate::worktree::cmd_remove_worktree(&app.registry, &base_dir, &window_name, false, false)
+    {
         Ok(()) => {
             // Reload the registry from disk so the removed row disappears
             // and all subsequent actions use the updated state.
@@ -264,7 +265,8 @@ pub fn execute_force_remove_worktree(app: &mut App) -> Result<()> {
     };
 
     let base_dir = app.registry.base_dir.clone();
-    match crate::worktree::cmd_remove_worktree(&app.registry, &base_dir, &window_name, true) {
+    match crate::worktree::cmd_remove_worktree(&app.registry, &base_dir, &window_name, true, false)
+    {
         Ok(()) => {
             match crate::registry::Registry::load(base_dir) {
                 Ok(new_reg) => app.reload_from_registry(new_reg),

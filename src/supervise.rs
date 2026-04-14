@@ -79,7 +79,9 @@ pub fn cmd_supervise(registry: &Registry) -> Result<()> {
             " _last=$(cat /tmp/task-master-supervisor-last 2>/dev/null || echo 0);",
             " if [ $(( _now - _last )) -ge 60 ]; then",
             // Idle skip: only run the agent if there are active phase windows
-            " if tmux list-windows -F '#{{window_name}}' 2>/dev/null | grep -qE ':(dev|qa|plan|e2e)$'; then",
+            // OR there are registered ephemeral worktrees (which may need cleanup).
+            " if tmux list-windows -F '#{{window_name}}' 2>/dev/null | grep -qE ':(dev|qa|plan|e2e)$'",
+            " || grep -q 'ephemeral = true' task-master.toml 2>/dev/null; then",
             " opencode run --agent supervisor 'Check worktree windows and act on any that need attention.';",
             " date +%s > /tmp/task-master-supervisor-last;",
             " fi;",
@@ -131,7 +133,8 @@ mod tests {
                 " _now=$(date +%s);",
                 " _last=$(cat /tmp/task-master-supervisor-last 2>/dev/null || echo 0);",
                 " if [ $(( _now - _last )) -ge 60 ]; then",
-                " if tmux list-windows -F '#{{window_name}}' 2>/dev/null | grep -qE ':(dev|qa|plan|e2e)$'; then",
+                " if tmux list-windows -F '#{{window_name}}' 2>/dev/null | grep -qE ':(dev|qa|plan|e2e)$'",
+                " || grep -q 'ephemeral = true' task-master.toml 2>/dev/null; then",
                 " opencode run --agent supervisor 'Check worktree windows and act on any that need attention.';",
                 " date +%s > /tmp/task-master-supervisor-last;",
                 " fi;",
@@ -177,6 +180,10 @@ mod tests {
         assert!(
             loop_cmd.contains(":(dev|qa|plan|e2e)$"),
             "loop_cmd must skip opencode run when no active phase windows exist"
+        );
+        assert!(
+            loop_cmd.contains("ephemeral = true"),
+            "loop_cmd must also wake when ephemeral worktrees are registered"
         );
     }
 

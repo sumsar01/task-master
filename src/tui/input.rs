@@ -1,6 +1,5 @@
 use super::actions::execute_close;
 use super::app::{ActionKind, App, ListEntry, Mode};
-use crate::registry::Registry;
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use std::time::Duration;
@@ -78,15 +77,10 @@ pub fn collect_char_burst(events: &[Event]) -> Option<String> {
 // Key handling
 // ---------------------------------------------------------------------------
 
-pub fn handle_key(
-    app: &mut App,
-    registry: &Registry,
-    code: KeyCode,
-    modifiers: KeyModifiers,
-) -> Result<()> {
+pub fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
     // Theme picker consumes all keys when open.
     if app.show_theme_picker {
-        return handle_theme_picker(app, registry, code);
+        return handle_theme_picker(app, code);
     }
     // Help overlay: any key closes it.
     if app.show_help {
@@ -95,15 +89,15 @@ pub fn handle_key(
     }
 
     match &app.mode.clone() {
-        Mode::Normal => handle_normal(app, registry, code),
-        Mode::Prompt(kind) => handle_prompt(app, registry, code, modifiers, kind.clone()),
-        Mode::ForceConfirm => handle_force_confirm(app, registry, code),
+        Mode::Normal => handle_normal(app, code),
+        Mode::Prompt(kind) => handle_prompt(app, code, modifiers, kind.clone()),
+        Mode::ForceConfirm => handle_force_confirm(app, code),
         Mode::ConfirmClose => handle_confirm_close(app, code),
-        Mode::ConfirmRemoveWorktree => handle_confirm_remove_worktree(app, registry, code),
+        Mode::ConfirmRemoveWorktree => handle_confirm_remove_worktree(app, code),
     }
 }
 
-fn handle_theme_picker(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()> {
+fn handle_theme_picker(app: &mut App, code: KeyCode) -> Result<()> {
     match code {
         KeyCode::Char('j') | KeyCode::Down => {
             app.theme_picker_move(1);
@@ -112,7 +106,7 @@ fn handle_theme_picker(app: &mut App, registry: &Registry, code: KeyCode) -> Res
             app.theme_picker_move(-1);
         }
         KeyCode::Enter => {
-            app.theme_picker_commit(registry);
+            app.theme_picker_commit();
         }
         KeyCode::Esc => {
             app.theme_picker_revert();
@@ -122,7 +116,7 @@ fn handle_theme_picker(app: &mut App, registry: &Registry, code: KeyCode) -> Res
     Ok(())
 }
 
-fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()> {
+fn handle_normal(app: &mut App, code: KeyCode) -> Result<()> {
     // If keys are arriving faster than 10 ms apart we are almost certainly in
     // the middle of a paste burst that the terminal chose not to wrap in
     // bracketed-paste markers (or the burst slipped past collect_char_burst
@@ -162,10 +156,10 @@ fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()
             if let Some(i) = app.selected() {
                 match app.entries.get(i) {
                     Some(ListEntry::GroupHeader { .. }) => {
-                        app.toggle_group_collapse(i, registry);
+                        app.toggle_group_collapse(i);
                     }
                     Some(ListEntry::ProjectHeader { .. }) => {
-                        app.toggle_collapse(i, registry);
+                        app.toggle_collapse(i);
                     }
                     _ => {}
                 }
@@ -298,7 +292,7 @@ fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()
                 super::actions::attach_to_window(&app.session, &window_name, &full_name);
             }
         }
-        KeyCode::Char('v') if !is_burst => match crate::supervise::cmd_supervise(registry) {
+        KeyCode::Char('v') if !is_burst => match crate::supervise::cmd_supervise(&app.registry) {
             Ok(()) => {
                 // Spawning the supervisor window can steal tmux focus away from
                 // the TUI, and leaves the terminal state stale enough for
@@ -343,7 +337,6 @@ fn handle_normal(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()
 
 pub fn handle_prompt(
     app: &mut App,
-    registry: &Registry,
     code: KeyCode,
     modifiers: KeyModifiers,
     kind: ActionKind,
@@ -367,7 +360,7 @@ pub fn handle_prompt(
                 app.input_buf.insert(app.cursor_pos, '\n');
                 app.cursor_pos += 1;
             } else {
-                super::actions::execute_action(app, registry, &kind, false)?;
+                super::actions::execute_action(app, &kind, false)?;
             }
         }
 
@@ -480,14 +473,14 @@ pub fn handle_prompt(
     Ok(())
 }
 
-pub fn handle_force_confirm(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()> {
+pub fn handle_force_confirm(app: &mut App, code: KeyCode) -> Result<()> {
     match code {
         KeyCode::Esc => {
             app.reset_input();
             app.status_msg = None;
         }
         KeyCode::Enter => {
-            super::actions::execute_spawn(app, registry, true)?;
+            super::actions::execute_spawn(app, true)?;
         }
         _ => {}
     }
@@ -512,10 +505,10 @@ fn handle_confirm_close(app: &mut App, code: KeyCode) -> Result<()> {
     Ok(())
 }
 
-fn handle_confirm_remove_worktree(app: &mut App, registry: &Registry, code: KeyCode) -> Result<()> {
+fn handle_confirm_remove_worktree(app: &mut App, code: KeyCode) -> Result<()> {
     match code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
-            super::actions::execute_remove_worktree(app, registry)?;
+            super::actions::execute_remove_worktree(app)?;
         }
         _ => {
             // Any other key cancels.

@@ -94,6 +94,7 @@ pub fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Resu
         Mode::ForceConfirm => handle_force_confirm(app, code),
         Mode::ConfirmClose => handle_confirm_close(app, code),
         Mode::ConfirmRemoveWorktree => handle_confirm_remove_worktree(app, code),
+        Mode::ForceConfirmRemoveWorktree => handle_force_confirm_remove_worktree(app, code),
     }
 }
 
@@ -516,6 +517,21 @@ fn handle_confirm_remove_worktree(app: &mut App, code: KeyCode) -> Result<()> {
             app.status_msg = None;
             app.needs_full_redraw = true;
         }
+    }
+    Ok(())
+}
+
+fn handle_force_confirm_remove_worktree(app: &mut App, code: KeyCode) -> Result<()> {
+    match code {
+        KeyCode::Esc => {
+            app.mode = Mode::Normal;
+            app.status_msg = None;
+            app.needs_full_redraw = true;
+        }
+        KeyCode::Enter => {
+            super::actions::execute_force_remove_worktree(app)?;
+        }
+        _ => {}
     }
     Ok(())
 }

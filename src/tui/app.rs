@@ -68,6 +68,8 @@ pub enum Mode {
     ConfirmClose,
     /// Confirm-remove-worktree modal: user pressed 'D', waiting for 'y' or any other key.
     ConfirmRemoveWorktree,
+    /// Remove worktree has modified files: user confirmed once, Enter force-removes, Esc cancels.
+    ForceConfirmRemoveWorktree,
 }
 
 pub struct App {

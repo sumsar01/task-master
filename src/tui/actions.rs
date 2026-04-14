@@ -238,14 +238,60 @@ pub fn execute_remove_worktree(app: &mut App) -> Result<()> {
             app.refresh_phases();
         }
         Err(e) => {
-            app.mode = Mode::Normal;
-            app.set_status(format!("Remove worktree failed: {}", e));
+            let msg = e.to_string();
+            if msg.contains("dirty") || msg.contains("modified or untracked") {
+                app.set_status(format!(
+                    "{} has modified/untracked files. Press Enter to force-remove, Esc to cancel.",
+                    window_name
+                ));
+                app.mode = Mode::ForceConfirmRemoveWorktree;
+            } else {
+                app.mode = Mode::Normal;
+                app.set_status(format!("Remove worktree failed: {}", msg));
+            }
+            app.needs_full_redraw = true;
         }
     }
     Ok(())
 }
 
-/// Re-select the TUI window after a tmux operation that may have stolen focus.
+/// Force-remove the currently selected worktree, discarding any local changes.
+/// Called after the user confirmed a second time from `ForceConfirmRemoveWorktree` mode.
+pub fn execute_force_remove_worktree(app: &mut App) -> Result<()> {
+    let window_name = match app.selected_worktree() {
+        Some(wt) => wt.window_name.clone(),
+        None => return Ok(()),
+    };
+
+    let base_dir = app.registry.base_dir.clone();
+    match crate::worktree::cmd_remove_worktree(&app.registry, &base_dir, &window_name, true) {
+        Ok(()) => {
+            match crate::registry::Registry::load(base_dir) {
+                Ok(new_reg) => app.reload_from_registry(new_reg),
+                Err(e) => {
+                    app.set_status(format!(
+                        "Removed worktree but failed to reload config: {}",
+                        e
+                    ));
+                    app.mode = Mode::Normal;
+                    app.needs_full_redraw = true;
+                    return Ok(());
+                }
+            }
+            app.mode = Mode::Normal;
+            app.set_status(format!("Force-removed {}.", window_name));
+            app.needs_full_redraw = true;
+            app.refresh_phases();
+        }
+        Err(e) => {
+            app.mode = Mode::Normal;
+            app.set_status(format!("Force-remove failed: {}", e));
+            app.needs_full_redraw = true;
+        }
+    }
+    Ok(())
+}
+
 ///
 /// Uses the stable `#{window_id}` (@N) rather than the window name, so that a
 /// worktree whose base name collides with the TUI window's name can never cause

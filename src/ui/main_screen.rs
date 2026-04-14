@@ -495,6 +495,11 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
         ),
         Mode::ConfirmClose => (String::new(), t.text_dim_style()),
         Mode::ConfirmRemoveWorktree => (String::new(), t.text_dim_style()),
+        Mode::ForceConfirmRemoveWorktree => (
+            " Press Enter to force-remove (discards uncommitted changes), Esc to cancel"
+                .to_string(),
+            t.text_style().fg(t.phase_error),
+        ),
         Mode::Normal => {
             if let Some(msg) = app.current_status() {
                 (format!(" {}", msg), t.text_dim_style())

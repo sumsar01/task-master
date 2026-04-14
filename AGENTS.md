@@ -9,6 +9,7 @@ bd ready              # Find available work
 bd show <id>          # View issue details
 bd update <id> --claim  # Claim work atomically
 bd close <id>         # Complete work
+bd dolt push          # Push beads data to remote
 ```
 
 ## Non-Interactive Shell Commands
@@ -50,11 +51,6 @@ When the user provides a task or plan to hand off to an agent, do the minimum ne
 
 This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
 
-Issues are **shared project-wide**. All worktrees in this project read from and write
-to the same beads database — the primary worktree owns the database, and all others have
-a `.beads/redirect` file pointing at it. No sync step is needed; every `bd` command is
-live regardless of which worktree you run it from.
-
 ### Quick Reference
 
 ```bash
@@ -82,6 +78,7 @@ bd close <id>         # Complete work
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
+   bd dolt push
    git push
    git status  # MUST show "up to date with origin"
    ```
@@ -94,7 +91,6 @@ bd close <id>         # Complete work
 - NEVER stop before pushing - that leaves work stranded locally
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
-- Do NOT run `bd dolt push` — beads issues are shared live via redirect, no sync needed
 <!-- END BEADS INTEGRATION -->
 
 ## PR Workflow & QA Agent

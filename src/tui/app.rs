@@ -1,7 +1,4 @@
-use crate::hooks;
-use crate::registry::{
-    self, write_collapsed, write_group_collapsed, ProjectConfig, Registry, Worktree,
-};
+use crate::registry::{write_collapsed, write_group_collapsed, ProjectConfig, Registry, Worktree};
 use crate::stats::{fetch_stats, StatsRow};
 use crate::status::find_live_phase;
 use crate::tmux;

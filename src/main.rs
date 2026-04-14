@@ -294,14 +294,20 @@ pub fn cmd_add_project(base_dir: &PathBuf, name: &str, short: &str, url: &str) -
     }
 
     info!("Cloning bare repo {} -> {}", url, repo_path.display());
-    let status = Command::new("git")
+    let output = Command::new("git")
         .args(["clone", "--bare", url])
         .arg(&repo_path)
-        .status()
+        .output()
         .context("Failed to run git clone")?;
 
-    if !status.success() {
-        bail!("git clone failed");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        if detail.is_empty() {
+            bail!("git clone failed (exit {})", output.status);
+        } else {
+            bail!("git clone failed: {}", detail);
+        }
     }
 
     // Append [[projects]] block to task-master.toml

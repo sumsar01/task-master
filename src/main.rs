@@ -102,6 +102,13 @@ enum Commands {
     },
     /// Install QA post-push git hooks into all registered worktrees
     InstallQaHooks,
+    /// Install opencode agent configs (plan.md, qa.md, e2e.md) into all registered worktrees
+    ///
+    /// Copies the agent config files from the task-master project into each worktree's
+    /// .opencode/agents/ directory so that `opencode --agent plan/qa/e2e` works when
+    /// running inside those worktrees. Run this once for existing worktrees; new
+    /// worktrees receive the configs automatically via `add-worktree`.
+    InstallAgentConfigs,
     /// Reset a worktree window's phase indicator back to idle
     Reset {
         /// Worktree window name, e.g. WIS-olive (with or without phase suffix)
@@ -127,6 +134,15 @@ enum Commands {
     },
     /// Open the interactive TUI dashboard
     Tui,
+    /// Apply per-project git identity overrides to all configured bare repos
+    ///
+    /// Reads the `git_name` and `git_email` fields from each [[projects]] entry in
+    /// task-master.toml and writes them into the corresponding bare repo's git config.
+    /// This ensures agents commit with the correct identity even when the worktree path
+    /// triggers an unintended includeIf rule in ~/.gitconfig.
+    ///
+    /// Safe to run multiple times — it is fully idempotent.
+    FixGitIdentity,
 }
 
 fn main() -> Result<()> {
@@ -216,6 +232,10 @@ fn main() -> Result<()> {
                     pr_number,
                 } => e2e::cmd_e2e(&registry, &worktree, pr_number),
                 Commands::InstallQaHooks => hooks::cmd_install_qa_hooks(&registry),
+                Commands::InstallAgentConfigs => {
+                    worktree::cmd_install_agent_configs(&registry, &base_dir)
+                        .map(|msg| println!("{}", msg))
+                }
                 Commands::Reset { worktree } => cmd_reset(&worktree),
                 Commands::Supervise => supervise::cmd_supervise(&registry),
                 Commands::Status => status::cmd_status(&registry),
@@ -224,6 +244,8 @@ fn main() -> Result<()> {
                     worktree::cmd_remove_worktree(&registry, &base_dir, &worktree, force)
                 }
                 Commands::Tui => tui::cmd_tui(&registry),
+                Commands::FixGitIdentity => worktree::cmd_fix_git_identity(&registry, &base_dir)
+                    .map(|msg| println!("{}", msg)),
                 Commands::AddProject { .. } => unreachable!(),
             }
         }

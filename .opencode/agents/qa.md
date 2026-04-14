@@ -36,10 +36,30 @@ Run: gh pr diff {{pr}}
 Look for bugs, missing error handling, missing tests, DRY violations, magic numbers, missing exports, and overly long functions/files. Fix what you can; use judgement on length limits.
 
 Step 2 - Resolve bot/reviewer comments
-Fetch all open review threads using the GitHub GraphQL API (`repository > pullRequest > reviewThreads`, first: 50, fields: id, isResolved, body).
-For every unresolved thread:
-- Actionable by a code change: apply the fix, then mark it resolved via the `resolveReviewThread` mutation.
-- Requires human judgement: leave it unresolved.
+Fetch all open review threads and their comment text:
+  gh api graphql -f query='{
+    repository(owner:"{{owner}}", name:"{{name}}") {
+      pullRequest(number: {{pr}}) {
+        reviewThreads(first: 50) {
+          nodes {
+            id
+            isResolved
+            comments(first: 5) { nodes { body } }
+          }
+        }
+      }
+    }
+  }'
+For every thread where isResolved is false:
+- Read the comment body from comments.nodes[0].body to understand what the reviewer asked.
+- Actionable by a code change: apply the fix, then mark the thread resolved:
+    gh api graphql -f query='mutation {
+      resolveReviewThread(input: { threadId: "<id>" }) {
+        thread { isResolved }
+      }
+    }'
+  Replace <id> with the thread's id from the fetch query above.
+- Requires human judgement or is a question: leave it unresolved.
 
 Step 3 - Check CI status
 Run: gh pr checks {{pr}}

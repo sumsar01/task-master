@@ -92,24 +92,30 @@ pub fn build_qa_prompt(
          Fix anything you can fix directly.\n\
          \n\
          Step 2 - Resolve bot/reviewer comments\n\
-         First, fetch all open review threads and their IDs:\n\
+         First, fetch all open review threads and their comment text:\n\
            gh api graphql -f query='{{\n\
              repository(owner:\"{owner}\", name:\"{name}\") {{\n\
                pullRequest(number: {pr}) {{\n\
                  reviewThreads(first: 50) {{\n\
-                   nodes {{ id isResolved body }}\n\
+                   nodes {{\n\
+                     id\n\
+                     isResolved\n\
+                     comments(first: 5) {{ nodes {{ body }} }}\n\
+                   }}\n\
                  }}\n\
                }}\n\
              }}\n\
            }}'\n\
          For every thread where isResolved is false:\n\
+         - Read the comment body from comments.nodes[0].body to understand what the reviewer asked.\n\
          - If the comment is actionable by a code change: apply the fix in the code.\n\
            Then mark the thread resolved:\n\
              gh api graphql -f query='mutation {{\n\
-               resolveReviewThread(input: {{ threadId: \"<threadId>\" }}) {{\n\
+               resolveReviewThread(input: {{ threadId: \"<id>\" }}) {{\n\
                  thread {{ isResolved }}\n\
                }}\n\
              }}'\n\
+           Replace <id> with the thread id from the fetch query above.\n\
          - If the comment is a question or requires human judgement: leave it unresolved.\n\
          \n\
          Step 3 - Check CI status\n\
@@ -272,11 +278,22 @@ pub fn detect_repo_slug(worktree_dir: &str) -> Result<String> {
         .with_context(|| format!("Could not parse GitHub slug from remote URL: {}", url))
 }
 
-/// Parse owner/repo from various GitHub URL formats:
-///   https://github.com/owner/repo.git
-///   git@github.com:owner/repo.git
 fn parse_github_slug(url: &str) -> Option<String> {
     let url = url.trim_end_matches(".git");
+
+    // Normalise credential-embedded HTTPS URLs:
+    // https://user:token@github.com/owner/repo  ->  https://github.com/owner/repo
+    let stripped;
+    let url = if url.starts_with("https://") {
+        if let Some(at_pos) = url.find('@') {
+            stripped = format!("https://{}", &url[at_pos + 1..]);
+            stripped.as_str()
+        } else {
+            url
+        }
+    } else {
+        url
+    };
 
     // HTTPS: https://github.com/owner/repo
     if let Some(rest) = url.strip_prefix("https://github.com/") {
@@ -475,6 +492,27 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_github_slug_with_embedded_credentials() {
+        // Regression: PAT token embedded in remote URL (the form git uses when
+        // credentials are stored inline, e.g. via a credential helper or
+        // `git remote set-url origin https://user:token@github.com/…`)
+        assert_eq!(
+            parse_github_slug(
+                "https://skrwhiteaway:gho_TOKEN@github.com/whiteaway/fulfillment-service"
+            ),
+            Some("whiteaway/fulfillment-service".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_github_slug_with_embedded_credentials_dot_git() {
+        assert_eq!(
+            parse_github_slug("https://user:token@github.com/owner/repo.git"),
+            Some("owner/repo".to_string())
+        );
+    }
+
+    #[test]
     fn test_build_qa_prompt_contains_rename_commands() {
         let prompt = build_qa_prompt(
             "acme/repo",
@@ -541,6 +579,36 @@ mod tests {
         assert!(prompt.contains("acme"));
         assert!(prompt.contains("isResolved"));
         assert!(prompt.contains("human judgement"));
+    }
+
+    #[test]
+    fn test_build_qa_prompt_step2_fetch_includes_comments_field() {
+        // The fetch query must request comment text so the agent can read
+        // what the reviewer wrote. Inline diff thread bodies are in
+        // comments.nodes.body, not the thread-level body field.
+        let prompt = build_qa_prompt("acme/repo", "feat/foo", 55, "s", "W-w", "master");
+        assert!(
+            prompt.contains("comments(first: 5)"),
+            "fetch query should request comments field to read reviewer text"
+        );
+        assert!(
+            prompt.contains("comments.nodes[0].body"),
+            "prompt should instruct agent to read comment text from comments.nodes[0].body"
+        );
+    }
+
+    #[test]
+    fn test_build_qa_prompt_step2_does_not_resolve_questions() {
+        // Guard: questions and human-judgement comments must never be auto-resolved.
+        let prompt = build_qa_prompt("acme/repo", "feat/foo", 55, "s", "W-w", "master");
+        assert!(
+            prompt.contains("human judgement") || prompt.contains("human-judgement"),
+            "prompt must preserve the rule about not resolving human-judgement threads"
+        );
+        assert!(
+            prompt.contains("leave it unresolved"),
+            "prompt must explicitly say to leave human-judgement threads unresolved"
+        );
     }
 
     // --- Bug 3: validate_branch ---

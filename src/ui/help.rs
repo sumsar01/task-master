@@ -45,6 +45,7 @@ const KEYBINDINGS: &[(&str, &str, &str)] = &[
     ("s", "spawn dev agent (prompts for task)", ""),
     ("p", "start planning agent (prompts for task)", ""),
     ("x", "run QA agent (prompts for PR #)", ""),
+    ("m", "send message to active agent", ""),
     ("r", "reset active window to idle", ""),
     ("a", "attach to active window", ""),
     ("v", "start / restart supervisor", ""),
@@ -62,8 +63,10 @@ const KEYBINDINGS: &[(&str, &str, &str)] = &[
     ("", "", ""),
     ("Projects", "", "section"),
     ("P", "add new project (clones bare repo)", ""),
+    ("Enter / Space", "collapse / expand project or group", ""),
     ("", "", ""),
-    ("Preview", "", "section"),
+    ("Panes", "", "section"),
+    ("d", "toggle git detail pane", ""),
     ("w", "toggle agent preview pane", ""),
     ("J", "scroll preview toward tail", ""),
     ("K", "scroll preview up (into history)", ""),
@@ -116,6 +119,11 @@ pub fn render(f: &mut Frame, t: &Theme) {
     }
 
     // Footer hint
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Status bar shows context-sensitive hints based on selection",
+        t.text_dim_style(),
+    )));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "  Press ? or Esc to close",

@@ -33,7 +33,7 @@ pub fn render(f: &mut Frame, app: &mut App, t: &Theme) {
         ])
         .split(area);
 
-    render_header(f, outer[0], t);
+    render_header(f, outer[0], app, t);
     render_content(f, outer[1], app, t);
     render_statusbar(f, outer[2], app, t);
 }
@@ -42,15 +42,26 @@ pub fn render(f: &mut Frame, app: &mut App, t: &Theme) {
 // Header (2 rows)
 // ---------------------------------------------------------------------------
 
-fn render_header(f: &mut Frame, area: Rect, t: &Theme) {
-    // Row 1: app name
-    // Row 2: key hint badges
+fn render_header(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
+    // Row 1: app name (left) + token/session stats for selected worktree (right)
+    // Row 2: minimal universal key hints only
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Length(1)])
         .split(area);
 
-    // App name
+    // ── Row 1: app name + stats ───────────────────────────────────────────────
+    let stats_text = header_stats_text(app);
+
+    // Split row 1 horizontally: app name left, stats right.
+    let row1_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(stats_text.chars().count() as u16 + 1),
+        ])
+        .split(rows[0]);
+
     let title = Paragraph::new(Line::from(vec![
         Span::raw(" "),
         Span::styled(
@@ -60,27 +71,17 @@ fn render_header(f: &mut Frame, area: Rect, t: &Theme) {
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
-    f.render_widget(title, rows[0]);
+    f.render_widget(title, row1_cols[0]);
 
-    // Key hints row
-    let hints: &[(&str, &str)] = &[
-        ("j/k", "navigate"),
-        ("s", "spawn"),
-        ("p", "plan"),
-        ("x", "qa"),
-        ("r", "reset"),
-        ("c", "close"),
-        ("a", "attach"),
-        ("v", "supervise"),
-        ("N", "new worktree"),
-        ("D", "rm worktree"),
-        ("P", "add project"),
-        ("d", "detail"),
-        ("w", "preview"),
-        ("t", "theme"),
-        ("?", "help"),
-        ("q", "quit"),
-    ];
+    if !stats_text.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(stats_text, t.text_dim_style())),
+            row1_cols[1],
+        );
+    }
+
+    // ── Row 2: universal hints only ───────────────────────────────────────────
+    let hints: &[(&str, &str)] = &[("j/k", "navigate"), ("?", "help"), ("q", "quit")];
 
     let mut spans = vec![Span::raw(" ")];
     for (i, (key, desc)) in hints.iter().enumerate() {
@@ -92,6 +93,31 @@ fn render_header(f: &mut Frame, area: Rect, t: &Theme) {
     }
 
     f.render_widget(Paragraph::new(Line::from(spans)), rows[1]);
+}
+
+/// Build the stats string shown in the header row 1 (right side).
+/// Returns an empty string when no worktree is selected or no data is cached.
+fn header_stats_text(app: &App) -> String {
+    let wt_idx = match app.selected_worktree_idx() {
+        Some(i) => i,
+        None => return String::new(),
+    };
+    let wt = match app.worktrees.get(wt_idx) {
+        Some(w) => w,
+        None => return String::new(),
+    };
+    match app.stats_cache.get(&wt_idx) {
+        Some(stats) if stats.input > 0 || stats.sessions > 0 => {
+            format!(
+                "{}  ·  {} in / {} out  ·  {} sessions ",
+                wt.window_name,
+                format_tokens(stats.input),
+                format_tokens(stats.output),
+                stats.sessions,
+            )
+        }
+        _ => String::new(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -554,35 +580,77 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
         ),
         Mode::Normal => {
             if let Some(msg) = app.current_status() {
-                (format!(" {}", msg), t.text_dim_style())
-            } else {
-                (stats_bar_text(app), t.text_dim_style())
+                // Transient status message takes priority.
+                f.render_widget(
+                    Paragraph::new(format!(" {}", msg)).style(t.text_dim_style()),
+                    area,
+                );
+                return;
             }
+            // Context-sensitive hint bar — render as styled spans.
+            render_context_hints(f, area, app, t);
+            return;
         }
     };
 
     f.render_widget(Paragraph::new(content).style(style), area);
 }
 
-fn stats_bar_text(app: &App) -> String {
-    let wt_idx = match app.selected_worktree_idx() {
-        Some(i) => i,
-        None => return " No worktree selected".to_string(),
-    };
-    let wt = match app.worktrees.get(wt_idx) {
-        Some(w) => w,
-        None => return String::new(),
-    };
-    match app.stats_cache.get(&wt_idx) {
-        Some(stats) if stats.input > 0 || stats.sessions > 0 => {
-            format!(
-                " {}  ·  {} in / {} out  ·  {} sessions",
-                wt.window_name,
-                format_tokens(stats.input),
-                format_tokens(stats.output),
-                stats.sessions,
-            )
+// ---------------------------------------------------------------------------
+// Context-sensitive hint bar (Normal mode, no transient status)
+// ---------------------------------------------------------------------------
+
+fn render_context_hints(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
+    let hints: &[(&str, &str)] = match app.selected() {
+        None => {
+            // Nothing selected at all.
+            &[("P", "add project"), ("?", "help"), ("q", "quit")]
         }
-        _ => format!(" {}  ·  no usage data", wt.window_name),
+        Some(idx) => match app.entries.get(idx) {
+            Some(ListEntry::GroupHeader { .. }) => &[
+                ("Enter", "collapse/expand"),
+                ("P", "add project"),
+                ("?", "help"),
+            ],
+            Some(ListEntry::ProjectHeader { .. }) => &[
+                ("Enter", "collapse/expand"),
+                ("N", "new worktree"),
+                ("E", "ephemeral"),
+                ("?", "help"),
+            ],
+            Some(ListEntry::Worktree { .. }) => {
+                let phase = app.selected_phase();
+                if App::is_active_phase(phase) {
+                    &[
+                        ("s", "spawn"),
+                        ("x", "qa"),
+                        ("m", "message"),
+                        ("r", "reset"),
+                        ("a", "attach"),
+                        ("?", "help"),
+                    ]
+                } else {
+                    &[
+                        ("s", "spawn"),
+                        ("p", "plan"),
+                        ("N", "new worktree"),
+                        ("c", "close"),
+                        ("?", "help"),
+                    ]
+                }
+            }
+            _ => &[("j/k", "navigate"), ("?", "help"), ("q", "quit")],
+        },
+    };
+
+    let mut spans = vec![Span::raw(" ")];
+    for (i, (key, desc)) in hints.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  ·  ", t.text_dim_style()));
+        }
+        spans.push(Span::styled(format!(" {key} "), t.key_badge_style()));
+        spans.push(Span::styled(format!(" {desc}"), t.key_desc_style()));
     }
+
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }

@@ -12,6 +12,9 @@ use ratatui::{widgets::Block, Frame};
 /// Top-level render dispatcher.
 /// Draws the active screen, then overlays on top.
 pub fn render(f: &mut Frame, app: &mut App) {
+    // Update terminal width so event-handlers can use it for word-wrap math.
+    app.terminal_width = f.area().width;
+
     let t = app.theme.clone();
 
     // Fill the entire frame with the theme background first, so no black

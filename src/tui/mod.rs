@@ -85,6 +85,7 @@ fn run_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut 
                     app.last_paste_at = std::time::Instant::now();
                     app.input_buf.insert_str(app.cursor_pos, &text);
                     app.cursor_pos += text.len();
+                    app.update_prompt_scroll();
                     if app.should_quit {
                         break;
                     }
@@ -104,6 +105,7 @@ fn run_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut 
                             // Insert pasted text at cursor position.
                             app.input_buf.insert_str(app.cursor_pos, &text);
                             app.cursor_pos += text.len();
+                            app.update_prompt_scroll();
                         }
                     }
                     _ => {}

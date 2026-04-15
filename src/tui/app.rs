@@ -157,6 +157,16 @@ pub struct App {
     /// The theme id that is currently written to config (used for the ✓ in the picker).
     pub saved_theme_id: String,
 
+    /// Vertical scroll offset for the prompt input area (in visual/wrapped lines).
+    /// Adjusted automatically after every keystroke so the cursor line stays
+    /// within the visible 8-row window.  Reset to 0 when the prompt is dismissed.
+    pub prompt_scroll: usize,
+
+    /// Last known terminal width, updated every render frame.  Used by
+    /// `update_prompt_scroll` to compute word-wrap line counts without needing
+    /// access to the Frame at event-handling time.
+    pub terminal_width: u16,
+
     /// When `true`, the next frame will call `terminal.clear()` before drawing.
     ///
     /// Set after any action that dismisses the prompt overlay (spawn, plan, qa,
@@ -225,6 +235,8 @@ impl App {
             saved_theme_id,
             last_paste_at: Instant::now() - Duration::from_secs(10),
             last_key_at: Instant::now() - Duration::from_secs(10),
+            prompt_scroll: 0,
+            terminal_width: 80,
             input_history: Vec::new(),
             history_idx: None,
             history_draft: String::new(),
@@ -684,6 +696,7 @@ impl App {
         self.mode = Mode::Normal;
         self.input_buf.clear();
         self.cursor_pos = 0;
+        self.prompt_scroll = 0;
         self.history_idx = None;
         self.history_draft.clear();
         // Force a full repaint on the next frame so the prompt overlay cells
@@ -743,8 +756,46 @@ impl App {
         }
     }
 
-    /// Resolve the project short name from the currently selected entry.
+    /// Adjust `prompt_scroll` so the cursor line is always within the visible
+    /// window of the prompt overlay (capped at `PROMPT_MAX_ROWS` content rows).
     ///
+    /// Call this after every change to `input_buf` or `cursor_pos` while the
+    /// prompt is open.  Uses `self.terminal_width` (refreshed each render frame)
+    /// to compute word-wrap boundaries.
+    pub fn update_prompt_scroll(&mut self) {
+        const PROMPT_MAX_ROWS: usize = 8;
+
+        // Inner width = terminal_width - 2 borders, minimum 1.
+        let inner_width = (self.terminal_width as usize).saturating_sub(2).max(1);
+
+        // Compute the visual line index of the cursor, matching the word-wrap
+        // logic used in prompt.rs's content_rows calculation.
+        let cursor_byte = self.cursor_pos.min(self.input_buf.len());
+        let text_before_cursor = &self.input_buf[..cursor_byte];
+
+        let mut cursor_visual_line: usize = 0;
+        for hard_line in text_before_cursor.split('\n') {
+            let chars = hard_line.chars().count();
+            // Each hard line contributes ceil(chars / inner_width) wrapped rows,
+            // minimum 1.  The cursor sits at the end of the last such row.
+            let rows = (chars / inner_width) + 1;
+            cursor_visual_line += rows;
+        }
+        // cursor_visual_line is now 1-based (the row the cursor is on).
+        // Convert to 0-based for easier arithmetic.
+        let cursor_row = cursor_visual_line.saturating_sub(1);
+
+        // Scroll up if cursor is above the visible window.
+        if cursor_row < self.prompt_scroll {
+            self.prompt_scroll = cursor_row;
+        }
+        // Scroll down if cursor is below the visible window.
+        if cursor_row >= self.prompt_scroll + PROMPT_MAX_ROWS {
+            self.prompt_scroll = cursor_row + 1 - PROMPT_MAX_ROWS;
+        }
+    }
+
+    /// Resolve the project short name from the currently selected entry.    ///
     /// Returns `Some(project_short)` when:
     /// - A `Worktree` row is selected → use that worktree's `project_short`.
     /// - A `ProjectHeader` row is selected → use that project's `short` name.

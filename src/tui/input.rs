@@ -360,6 +360,7 @@ pub fn handle_prompt(
             if app.last_paste_at.elapsed() < PASTE_DEBOUNCE_THRESHOLD {
                 app.input_buf.insert(app.cursor_pos, '\n');
                 app.cursor_pos += 1;
+                app.update_prompt_scroll();
             } else {
                 super::actions::execute_action(app, &kind, false)?;
             }
@@ -369,36 +370,45 @@ pub fn handle_prompt(
         KeyCode::Left if ctrl => {
             // Move to start of previous word.
             app.cursor_pos = prev_word_boundary(&app.input_buf, app.cursor_pos);
+            app.update_prompt_scroll();
         }
         KeyCode::Right if ctrl => {
             // Move to end of next word.
             app.cursor_pos = next_word_boundary(&app.input_buf, app.cursor_pos);
+            app.update_prompt_scroll();
         }
         KeyCode::Left => {
             app.cursor_pos = prev_char_boundary(&app.input_buf, app.cursor_pos);
+            app.update_prompt_scroll();
         }
         KeyCode::Right => {
             app.cursor_pos = next_char_boundary(&app.input_buf, app.cursor_pos);
+            app.update_prompt_scroll();
         }
         KeyCode::Home => {
             app.cursor_pos = 0;
+            app.update_prompt_scroll();
         }
         KeyCode::End => {
             app.cursor_pos = app.input_buf.len();
+            app.update_prompt_scroll();
         }
 
         // ── Ctrl+A / Ctrl+E ───────────────────────────────────────────────────
         KeyCode::Char('a') if ctrl => {
             app.cursor_pos = 0;
+            app.update_prompt_scroll();
         }
         KeyCode::Char('e') if ctrl => {
             app.cursor_pos = app.input_buf.len();
+            app.update_prompt_scroll();
         }
 
         // ── Ctrl+U: clear from start to cursor ────────────────────────────────
         KeyCode::Char('u') if ctrl => {
             app.input_buf.drain(..app.cursor_pos);
             app.cursor_pos = 0;
+            app.update_prompt_scroll();
         }
 
         // ── Ctrl+W: delete previous word ──────────────────────────────────────
@@ -406,6 +416,7 @@ pub fn handle_prompt(
             let new_pos = prev_word_boundary(&app.input_buf, app.cursor_pos);
             app.input_buf.drain(new_pos..app.cursor_pos);
             app.cursor_pos = new_pos;
+            app.update_prompt_scroll();
         }
 
         // ── Backspace: delete char before cursor ──────────────────────────────
@@ -414,6 +425,7 @@ pub fn handle_prompt(
             if new_pos < app.cursor_pos {
                 app.input_buf.drain(new_pos..app.cursor_pos);
                 app.cursor_pos = new_pos;
+                app.update_prompt_scroll();
             }
         }
 
@@ -422,6 +434,7 @@ pub fn handle_prompt(
             let end = next_char_boundary(&app.input_buf, app.cursor_pos);
             if end > app.cursor_pos {
                 app.input_buf.drain(app.cursor_pos..end);
+                app.update_prompt_scroll();
             }
         }
 
@@ -443,6 +456,7 @@ pub fn handle_prompt(
             app.history_idx = Some(new_idx);
             app.input_buf = app.input_history[new_idx].clone();
             app.cursor_pos = app.input_buf.len();
+            app.update_prompt_scroll();
         }
         KeyCode::Down => {
             match app.history_idx {
@@ -452,11 +466,13 @@ pub fn handle_prompt(
                     app.input_buf = app.history_draft.clone();
                     app.cursor_pos = app.input_buf.len();
                     app.history_idx = None;
+                    app.update_prompt_scroll();
                 }
                 Some(i) => {
                     app.history_idx = Some(i + 1);
                     app.input_buf = app.input_history[i + 1].clone();
                     app.cursor_pos = app.input_buf.len();
+                    app.update_prompt_scroll();
                 }
             }
         }
@@ -467,6 +483,7 @@ pub fn handle_prompt(
             app.cursor_pos += c.len_utf8();
             // Typing exits history browsing.
             app.history_idx = None;
+            app.update_prompt_scroll();
         }
 
         _ => {}

@@ -152,5 +152,10 @@ pub fn render(f: &mut Frame, app: &App, t: &Theme) {
         lines.push(Line::from(Span::styled(line, t.text_style())));
     }
 
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), rows[1]);
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((app.prompt_scroll as u16, 0)),
+        rows[1],
+    );
 }

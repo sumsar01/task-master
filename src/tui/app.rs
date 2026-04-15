@@ -1,7 +1,4 @@
-use crate::hooks;
-use crate::registry::{
-    self, write_collapsed, write_group_collapsed, ProjectConfig, Registry, Worktree,
-};
+use crate::registry::{write_collapsed, write_group_collapsed, ProjectConfig, Registry, Worktree};
 use crate::stats::{fetch_stats, StatsRow};
 use crate::status::find_live_phase;
 use crate::tmux;
@@ -56,6 +53,25 @@ pub enum ActionKind {
     Send,
     /// User typed a new worktree name; Enter calls execute_add_worktree.
     AddWorktree,
+    /// Multi-step prompt for adding a new project (name → short → url).
+    AddProject,
+}
+
+/// Tracks which input step the add-project flow is on.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AddProjectStep {
+    /// Step 1: collecting the full project name (e.g. "warehouse-integration-service").
+    Name,
+    /// Step 2: collecting the short prefix (e.g. "WIS").
+    Short,
+    /// Step 3: collecting the git repo URL to clone.
+    Url,
+    /// Step 4: selecting the GitHub account to use for cloning.
+    Account,
+    /// Step 5: optional super-group label (e.g. "Whiteaway", "Personal").
+    Group,
+    /// Step 6: optional bounded-context tag (e.g. "fulfillment", "delivery-and-logistics").
+    Context,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -70,6 +86,9 @@ pub enum Mode {
     ConfirmRemoveWorktree,
     /// Remove worktree has modified files: user confirmed once, Enter force-removes, Esc cancels.
     ForceConfirmRemoveWorktree,
+    /// A long-running clone is running in a background thread.
+    /// The TUI shows an animated spinner and ignores all key input until done.
+    Cloning,
 }
 
 pub struct App {
@@ -176,6 +195,36 @@ pub struct App {
     /// cells, and a tmux window-switch round-trip can leave the terminal state
     /// stale enough that the diff misses cells that need clearing.
     pub needs_full_redraw: bool,
+
+    // ── Add-project multi-step flow ───────────────────────────────────────────
+    /// Which step of the add-project flow we are currently collecting input for.
+    /// `None` when no add-project flow is active.
+    pub add_project_step: Option<AddProjectStep>,
+    /// Partial result: project full name collected in step 1.
+    pub pending_project_name: String,
+    /// Partial result: project short name collected in step 2.
+    pub pending_project_short: String,
+    /// Partial result: git repo URL collected in step 3.
+    pub pending_project_url: String,
+    /// Partial result: gh account collected in step 4.
+    pub pending_project_account: String,
+    /// Partial result: group label collected in step 5 (None = no group).
+    pub pending_project_group: Option<String>,
+    /// Partial result: bounded-context tag collected in step 6 (None = no context).
+    pub pending_project_context: Option<String>,
+    /// Cycle options for the Group step (distinct existing groups + empty).
+    pub group_cycle_options: Vec<String>,
+    /// Cycle options for the Context step (distinct existing contexts + empty).
+    pub context_cycle_options: Vec<String>,
+
+    // ── Background clone state ────────────────────────────────────────────────
+    /// Receives the result of a background git-clone spawned during add-project.
+    /// `Some` while `Mode::Cloning` is active; `None` otherwise.
+    pub clone_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    /// Human-readable label shown next to the spinner, e.g. "Cloning my-service…".
+    pub cloning_label: String,
+    /// Current frame index for the braille spinner (0–7, wraps).
+    pub spinner_frame: u8,
 }
 
 impl App {
@@ -241,6 +290,18 @@ impl App {
             history_idx: None,
             history_draft: String::new(),
             needs_full_redraw: false,
+            add_project_step: None,
+            pending_project_name: String::new(),
+            pending_project_short: String::new(),
+            pending_project_url: String::new(),
+            pending_project_account: String::new(),
+            pending_project_group: None,
+            pending_project_context: None,
+            group_cycle_options: Vec::new(),
+            context_cycle_options: Vec::new(),
+            clone_rx: None,
+            cloning_label: String::new(),
+            spinner_frame: 0,
         }
     }
 
@@ -699,6 +760,19 @@ impl App {
         self.prompt_scroll = 0;
         self.history_idx = None;
         self.history_draft.clear();
+        // Clear any in-progress add-project flow so stale state can never leak.
+        // NOTE: clone_rx / cloning_label / spinner_frame are intentionally NOT
+        // cleared here — they persist across reset_input while Mode::Cloning is
+        // active and are only cleared when the background thread delivers its result.
+        self.add_project_step = None;
+        self.pending_project_name.clear();
+        self.pending_project_short.clear();
+        self.pending_project_url.clear();
+        self.pending_project_account.clear();
+        self.pending_project_group = None;
+        self.pending_project_context = None;
+        self.group_cycle_options.clear();
+        self.context_cycle_options.clear();
         // Force a full repaint on the next frame so the prompt overlay cells
         // are cleared even if ratatui's diff renderer would otherwise skip them
         // (e.g. after a tmux window-switch leaves the terminal state stale).

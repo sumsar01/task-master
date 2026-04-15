@@ -1,4 +1,4 @@
-use super::app::{ActionKind, App, Mode};
+use super::app::{ActionKind, AddProjectStep, App, Mode};
 use crate::tmux;
 use anyhow::Result;
 
@@ -18,6 +18,7 @@ pub fn execute_action(app: &mut App, kind: &ActionKind, force: bool) -> Result<(
         ActionKind::Qa => execute_qa(app),
         ActionKind::Send => execute_send(app),
         ActionKind::AddWorktree => execute_add_worktree(app),
+        ActionKind::AddProject => execute_add_project(app),
     }
 }
 
@@ -252,6 +253,212 @@ pub fn execute_remove_worktree(app: &mut App) -> Result<()> {
             app.needs_full_redraw = true;
         }
     }
+    Ok(())
+}
+
+/// Returns the list of logged-in gh accounts by parsing `gh auth status`.
+fn gh_accounts() -> Vec<String> {
+    let out = std::process::Command::new("gh")
+        .args(["auth", "status"])
+        .output();
+    match out {
+        Ok(o) => {
+            let text = String::from_utf8_lossy(&o.stderr).to_string()
+                + &String::from_utf8_lossy(&o.stdout);
+            text.lines()
+                .filter_map(|l| {
+                    let l = l.trim();
+                    // Lines look like: "✓ Logged in to github.com account sumsar01 (keyring)"
+                    if l.contains("Logged in to") && l.contains("account") {
+                        l.split("account ")
+                            .nth(1)
+                            .map(|s| s.split_whitespace().next().unwrap_or("").to_string())
+                    } else {
+                        None
+                    }
+                })
+                .filter(|s| !s.is_empty())
+                .collect()
+        }
+        Err(_) => vec![],
+    }
+}
+
+/// Returns distinct sorted values for a string field from all projects.
+fn collect_cycle_options<F>(app: &App, f: F) -> Vec<String>
+where
+    F: Fn(&crate::registry::ProjectConfig) -> Option<&str>,
+{
+    let mut seen = std::collections::HashSet::new();
+    let mut opts: Vec<String> = app
+        .registry
+        .projects
+        .iter()
+        .filter_map(|p| f(p).map(str::to_owned))
+        .filter(|s| seen.insert(s.clone()))
+        .collect();
+    opts.sort();
+    opts
+}
+
+/// Add a new project via a six-step prompt sequence:
+///   Name → Short → URL → Account → Group (optional) → Context (optional)
+///
+/// Called on each Enter press while `Mode::Prompt(ActionKind::AddProject)` is active.
+/// After the Context step the clone is kicked off in a background thread and
+/// `app.mode` transitions to `Mode::Cloning`.
+pub fn execute_add_project(app: &mut App) -> Result<()> {
+    let step = match app.add_project_step.clone() {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
+    let input = app.input_buf.trim().to_string();
+
+    match step {
+        AddProjectStep::Name => {
+            if input.is_empty() {
+                app.set_status("Project name cannot be empty.");
+                return Ok(());
+            }
+            app.pending_project_name = input;
+            app.input_buf.clear();
+            app.cursor_pos = 0;
+            app.add_project_step = Some(AddProjectStep::Short);
+            app.set_status(format!(
+                "Project '{}' — enter short name (e.g. WIS):",
+                app.pending_project_name
+            ));
+        }
+        AddProjectStep::Short => {
+            if input.is_empty() {
+                app.set_status("Short name cannot be empty.");
+                return Ok(());
+            }
+            app.pending_project_short = input;
+            app.input_buf.clear();
+            app.cursor_pos = 0;
+            app.add_project_step = Some(AddProjectStep::Url);
+            app.set_status(format!(
+                "'{}' ({}) — enter git repo URL:",
+                app.pending_project_name, app.pending_project_short
+            ));
+        }
+        AddProjectStep::Url => {
+            if input.is_empty() {
+                app.set_status("Repo URL cannot be empty.");
+                return Ok(());
+            }
+            app.pending_project_url = input;
+            app.input_buf.clear();
+            app.cursor_pos = 0;
+            app.add_project_step = Some(AddProjectStep::Account);
+            // Pre-populate with the first logged-in gh account.
+            let accounts = gh_accounts();
+            let hint = accounts.join(" / ");
+            if let Some(first) = accounts.into_iter().next() {
+                app.input_buf = first.clone();
+                app.cursor_pos = first.len();
+            }
+            app.set_status(format!(
+                "URL saved — enter gh account to clone with ({}): ",
+                hint
+            ));
+        }
+        AddProjectStep::Account => {
+            if input.is_empty() {
+                app.set_status("Account cannot be empty.");
+                return Ok(());
+            }
+            app.pending_project_account = input;
+            app.input_buf.clear();
+            app.cursor_pos = 0;
+            app.add_project_step = Some(AddProjectStep::Group);
+            // Build cycle options from existing groups.
+            let opts = collect_cycle_options(app, |p| p.group.as_deref());
+            let hint = if opts.is_empty() {
+                "none yet".to_string()
+            } else {
+                opts.join(" / ")
+            };
+            app.group_cycle_options = opts;
+            // Leave input empty — user can Tab to cycle or type a new name.
+            app.set_status(format!(
+                "Enter group (Tab to cycle: {}) or leave empty:",
+                hint
+            ));
+        }
+        AddProjectStep::Group => {
+            // Empty = no group (ungrouped), non-empty = group name.
+            app.pending_project_group = if input.is_empty() { None } else { Some(input) };
+            app.input_buf.clear();
+            app.cursor_pos = 0;
+            app.add_project_step = Some(AddProjectStep::Context);
+            // Build cycle options from existing contexts.
+            let opts = collect_cycle_options(app, |p| p.context.as_deref());
+            let hint = if opts.is_empty() {
+                "none yet".to_string()
+            } else {
+                opts.join(" / ")
+            };
+            app.context_cycle_options = opts;
+            app.set_status(format!(
+                "Enter bounded context (Tab to cycle: {}) or leave empty:",
+                hint
+            ));
+        }
+        AddProjectStep::Context => {
+            // Empty = no context, non-empty = context tag.
+            app.pending_project_context = if input.is_empty() { None } else { Some(input) };
+
+            // All metadata collected — kick off background clone.
+            let name = app.pending_project_name.clone();
+            let short = app.pending_project_short.clone();
+            let url = app.pending_project_url.clone();
+            let account = app.pending_project_account.clone();
+            let group = app.pending_project_group.clone();
+            let context = app.pending_project_context.clone();
+            let base_dir = app.registry.base_dir.clone();
+
+            // Derive the spinner label before url is moved into the thread.
+            let label = url
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or(&url)
+                .trim_end_matches(".git")
+                .to_string();
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let result = crate::cmd_add_project(
+                    &base_dir,
+                    &name,
+                    &short,
+                    &url,
+                    Some(&account),
+                    group.as_deref(),
+                    context.as_deref(),
+                );
+                let msg = result
+                    .map(|_| {
+                        format!(
+                            "Added project {} ({}). Press N to add a worktree.",
+                            name, short
+                        )
+                    })
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(msg);
+            });
+
+            app.clone_rx = Some(rx);
+            app.cloning_label = format!("Cloning {}…", label);
+            // reset_input clears input/mode fields but we override mode to Cloning.
+            app.reset_input();
+            app.mode = Mode::Cloning;
+        }
+    }
+
     Ok(())
 }
 

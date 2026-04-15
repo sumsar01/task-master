@@ -35,6 +35,20 @@ pub fn render(f: &mut Frame, app: &App, t: &Theme) {
         Mode::Prompt(ActionKind::Qa) => (" QA — Enter PR # ", true),
         Mode::Prompt(ActionKind::Send) => (" Send Message ", true),
         Mode::Prompt(ActionKind::AddWorktree) => (" New Worktree — Enter name ", true),
+        Mode::Prompt(ActionKind::AddProject) => {
+            use crate::tui::AddProjectStep;
+            match &app.add_project_step {
+                Some(AddProjectStep::Name) => (" Add Project — Enter full name ", true),
+                Some(AddProjectStep::Short) => (" Add Project — Enter short name ", true),
+                Some(AddProjectStep::Url) => (" Add Project — Enter git repo URL ", true),
+                Some(AddProjectStep::Account) => (" Add Project — Enter gh account ", true),
+                Some(AddProjectStep::Group) => (" Add Project — Enter group (Tab to cycle) ", true),
+                Some(AddProjectStep::Context) => {
+                    (" Add Project — Enter bounded context (Tab to cycle) ", true)
+                }
+                None => return,
+            }
+        }
         _ => return,
     };
 

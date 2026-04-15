@@ -1,4 +1,4 @@
-use super::app::{ActionKind, AddProjectStep, App, Mode};
+use super::app::{ActionKind, AddProjectStep, App, CloningOp, Mode};
 use crate::tmux;
 use anyhow::Result;
 
@@ -28,29 +28,66 @@ pub fn execute_spawn(app: &mut App, force: bool) -> Result<()> {
         Some(x) => x,
         None => return Ok(()),
     };
-    match crate::spawn::cmd_spawn(&app.registry, &wt_name, &prompt, force) {
-        Ok(_) => {
-            refocus_tui_window(&app.session, &app.tui_window_id);
-            app.set_status(format!("Spawned {}:dev", wt_name));
-            push_history(app, &prompt);
-            app.reset_input();
-            app.refresh_phases();
-        }
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("uncommitted changes") && !force {
+
+    // Quick synchronous check: if the worktree has uncommitted changes and
+    // force is false, surface the ForceConfirm prompt before entering Cloning
+    // mode (the user needs to confirm interactively first).
+    //
+    // We do this by running a lightweight git-status check before spawning the
+    // background thread so we don't block the TUI for the full fetch+reset.
+    if !force {
+        if let Some(wt) = app.registry.find_worktree(&wt_name) {
+            let has_changes = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&wt.abs_path)
+                .args(["status", "--porcelain"])
+                .output()
+                .map(|o| !o.stdout.is_empty())
+                .unwrap_or(false);
+            if has_changes {
                 app.set_status(format!(
                     "{} has uncommitted changes. Press Enter to force-reset and spawn, Esc to cancel.",
                     wt_name
                 ));
                 app.mode = Mode::ForceConfirm;
-            } else {
-                app.set_status(format!("Spawn failed: {}", msg));
-                app.reset_input();
+                return Ok(());
             }
         }
     }
+
+    // Kick off background thread: reset worktree + spawn tmux window.
+    let registry = app.registry.clone();
+    let label = format!("Spawning {}…", wt_name);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = crate::spawn::cmd_spawn(&registry, &wt_name, &prompt, force);
+        let msg = result
+            .map(|_| format!("Spawned {}:dev", wt_name))
+            .map_err(|e| format!("Spawn failed: {}", e));
+        let _ = tx.send(msg);
+    });
+
+    // Save the prompt for history so run_loop can push it after completion.
+    let prompt_for_history = collect_spawn_inputs_prompt(app);
+    app.clone_rx = Some(rx);
+    app.cloning_label = label;
+    app.cloning_op = CloningOp::Spawn;
+    app.pending_history_entry = prompt_for_history;
+    app.reset_input();
+    app.mode = Mode::Cloning;
     Ok(())
+}
+
+/// Extract only the prompt text from the input buffer (without consuming it).
+/// Returns `Some(prompt)` if non-empty, `None` otherwise.
+fn collect_spawn_inputs_prompt(app: &App) -> Option<String> {
+    let p = app.input_buf.trim().to_string();
+    if p.is_empty() {
+        None
+    } else {
+        Some(p)
+    }
 }
 
 pub fn execute_plan(app: &mut App) -> Result<()> {
@@ -58,19 +95,26 @@ pub fn execute_plan(app: &mut App) -> Result<()> {
         Some(x) => x,
         None => return Ok(()),
     };
-    match crate::plan::cmd_plan(&app.registry, &wt_name, &prompt) {
-        Ok(_) => {
-            refocus_tui_window(&app.session, &app.tui_window_id);
-            app.set_status(format!("Plan agent started in {}:plan", wt_name));
-            push_history(app, &prompt);
-            app.reset_input();
-            app.refresh_phases();
-        }
-        Err(e) => {
-            app.set_status(format!("Plan failed: {}", e));
-            app.reset_input();
-        }
-    }
+
+    let registry = app.registry.clone();
+    let label = format!("Planning {}…", wt_name);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = crate::plan::cmd_plan(&registry, &wt_name, &prompt);
+        let msg = result
+            .map(|_| format!("Plan agent started in {}:plan", wt_name))
+            .map_err(|e| format!("Plan failed: {}", e));
+        let _ = tx.send(msg);
+    });
+
+    let prompt_for_history = collect_spawn_inputs_prompt(app);
+    app.clone_rx = Some(rx);
+    app.cloning_label = label;
+    app.cloning_op = CloningOp::Plan;
+    app.pending_history_entry = prompt_for_history;
+    app.reset_input();
+    app.mode = Mode::Cloning;
     Ok(())
 }
 
@@ -162,8 +206,8 @@ pub fn execute_send(app: &mut App) -> Result<()> {
 ///
 /// The worktree name is read from `app.input_buf`. The project is inferred
 /// from the selected entry (Worktree row → its project; ProjectHeader → that
-/// project). On success the registry is reloaded from disk so the new row
-/// appears immediately.
+/// project). The operation is kicked off in a background thread so the TUI
+/// remains animated (spinner) while git worktree add + bd init are running.
 pub fn execute_add_worktree(app: &mut App) -> Result<()> {
     let name = app.input_buf.trim().to_string();
     if name.is_empty() {
@@ -180,37 +224,35 @@ pub fn execute_add_worktree(app: &mut App) -> Result<()> {
     };
 
     let base_dir = app.registry.base_dir.clone();
-    match crate::worktree::cmd_add_worktree(&app.registry, &base_dir, &project_short, &name, None) {
-        Ok(_) => {
-            // Reload the registry from disk so the new worktree is visible
-            // and all subsequent actions (spawn, remove) use the updated state.
-            match crate::registry::Registry::load(base_dir) {
-                Ok(new_reg) => app.reload_from_registry(new_reg),
-                Err(e) => {
-                    app.set_status(format!("Added worktree but failed to reload config: {}", e));
-                    app.reset_input();
-                    return Ok(());
-                }
-            }
-            refocus_tui_window(&app.session, &app.tui_window_id);
-            app.set_status(format!(
-                "Added {}-{}. Press s to spawn an agent.",
-                project_short, name
-            ));
-            app.reset_input();
-            app.refresh_phases();
-        }
-        Err(e) => {
-            app.set_status(format!("Add worktree failed: {}", e));
-            app.reset_input();
-        }
-    }
+    let registry = app.registry.clone();
+    let label = format!("Adding {}-{}…", project_short, name);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result =
+            crate::worktree::cmd_add_worktree(&registry, &base_dir, &project_short, &name, None);
+        let msg = result
+            .map(|_| {
+                format!(
+                    "Added {}-{}. Press s to spawn an agent.",
+                    project_short, name
+                )
+            })
+            .map_err(|e| format!("Add worktree failed: {}", e));
+        let _ = tx.send(msg);
+    });
+
+    app.clone_rx = Some(rx);
+    app.cloning_label = label;
+    app.cloning_op = CloningOp::AddWorktree;
+    app.reset_input();
+    app.mode = Mode::Cloning;
     Ok(())
 }
 
 /// Remove the currently selected git worktree (runs `git worktree remove` and
-/// removes the entry from `task-master.toml`).  On success the registry is
-/// reloaded so the row disappears immediately.
+/// removes the entry from `task-master.toml`). The operation is kicked off in
+/// a background thread so the TUI remains animated while git cleans up.
 pub fn execute_remove_worktree(app: &mut App) -> Result<()> {
     let window_name = match app.selected_worktree() {
         Some(wt) => wt.window_name.clone(),
@@ -218,27 +260,24 @@ pub fn execute_remove_worktree(app: &mut App) -> Result<()> {
     };
 
     let base_dir = app.registry.base_dir.clone();
-    match crate::worktree::cmd_remove_worktree(&app.registry, &base_dir, &window_name, false, false)
-    {
+    let registry = app.registry.clone();
+    let label = format!("Removing {}…", window_name);
+
+    // Run a quick synchronous check first: if the worktree has dirty files we
+    // need to surface the ForceConfirm prompt *before* entering Cloning mode,
+    // because the user needs to confirm interactively.
+    match crate::worktree::cmd_remove_worktree(&registry, &base_dir, &window_name, false, false) {
         Ok(()) => {
-            // Reload the registry from disk so the removed row disappears
-            // and all subsequent actions use the updated state.
-            match crate::registry::Registry::load(base_dir) {
-                Ok(new_reg) => app.reload_from_registry(new_reg),
-                Err(e) => {
-                    app.set_status(format!(
-                        "Removed worktree but failed to reload config: {}",
-                        e
-                    ));
-                    app.mode = Mode::Normal;
-                    app.needs_full_redraw = true;
-                    return Ok(());
-                }
-            }
-            app.mode = Mode::Normal;
-            app.set_status(format!("Removed {}.", window_name));
+            // Fast path: removal succeeded synchronously (no dirty files check
+            // — worktree remove is usually fast when clean). Use the background
+            // channel pattern so the run_loop handler reloads the registry.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _ = tx.send(Ok(format!("Removed {}.", window_name)));
+            app.clone_rx = Some(rx);
+            app.cloning_label = label;
+            app.cloning_op = CloningOp::RemoveWorktree;
+            app.mode = Mode::Cloning;
             app.needs_full_redraw = true;
-            app.refresh_phases();
         }
         Err(e) => {
             let msg = e.to_string();
@@ -455,6 +494,7 @@ pub fn execute_add_project(app: &mut App) -> Result<()> {
 
             app.clone_rx = Some(rx);
             app.cloning_label = format!("Cloning {}…", label);
+            app.cloning_op = CloningOp::AddProject;
             // reset_input clears input/mode fields but we override mode to Cloning.
             app.reset_input();
             app.mode = Mode::Cloning;
@@ -473,32 +513,24 @@ pub fn execute_force_remove_worktree(app: &mut App) -> Result<()> {
     };
 
     let base_dir = app.registry.base_dir.clone();
-    match crate::worktree::cmd_remove_worktree(&app.registry, &base_dir, &window_name, true, false)
-    {
-        Ok(()) => {
-            match crate::registry::Registry::load(base_dir) {
-                Ok(new_reg) => app.reload_from_registry(new_reg),
-                Err(e) => {
-                    app.set_status(format!(
-                        "Removed worktree but failed to reload config: {}",
-                        e
-                    ));
-                    app.mode = Mode::Normal;
-                    app.needs_full_redraw = true;
-                    return Ok(());
-                }
-            }
-            app.mode = Mode::Normal;
-            app.set_status(format!("Force-removed {}.", window_name));
-            app.needs_full_redraw = true;
-            app.refresh_phases();
-        }
-        Err(e) => {
-            app.mode = Mode::Normal;
-            app.set_status(format!("Force-remove failed: {}", e));
-            app.needs_full_redraw = true;
-        }
-    }
+    let registry = app.registry.clone();
+    let label = format!("Force-removing {}…", window_name);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result =
+            crate::worktree::cmd_remove_worktree(&registry, &base_dir, &window_name, true, false);
+        let msg = result
+            .map(|()| format!("Force-removed {}.", window_name))
+            .map_err(|e| format!("Force-remove failed: {}", e));
+        let _ = tx.send(msg);
+    });
+
+    app.clone_rx = Some(rx);
+    app.cloning_label = label;
+    app.cloning_op = CloningOp::RemoveWorktree;
+    app.mode = Mode::Cloning;
+    app.needs_full_redraw = true;
     Ok(())
 }
 
@@ -510,7 +542,7 @@ pub fn execute_force_remove_worktree(app: &mut App) -> Result<()> {
 /// Sends select-window twice with a brief sleep between them: the first
 /// call reclaims focus immediately; the sleep lets opencode's startup settle;
 /// the second call wins the race against any delayed tmux activity event.
-fn refocus_tui_window(session: &str, tui_window_id: &str) {
+pub(super) fn refocus_tui_window(session: &str, tui_window_id: &str) {
     let _ = tmux::select_window_by_id(session, tui_window_id);
     std::thread::sleep(std::time::Duration::from_millis(TMUX_REFOCUS_DELAY_MS));
     let _ = tmux::select_window_by_id(session, tui_window_id);

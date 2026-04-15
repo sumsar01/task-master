@@ -41,6 +41,7 @@ pub fn render(f: &mut Frame, app: &App, t: &Theme) {
                 Some(AddProjectStep::Name) => (" Add Project — Enter full name ", true),
                 Some(AddProjectStep::Short) => (" Add Project — Enter short name ", true),
                 Some(AddProjectStep::Url) => (" Add Project — Enter git repo URL ", true),
+                Some(AddProjectStep::Account) => (" Add Project — Enter gh account ", true),
                 None => return,
             }
         }

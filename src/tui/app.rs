@@ -66,6 +66,8 @@ pub enum AddProjectStep {
     Short,
     /// Step 3: collecting the git repo URL to clone.
     Url,
+    /// Step 4: selecting the GitHub account to use for cloning.
+    Account,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -185,6 +187,8 @@ pub struct App {
     pub pending_project_name: String,
     /// Partial result: project short name collected in step 2.
     pub pending_project_short: String,
+    /// Partial result: git repo URL collected in step 3.
+    pub pending_project_url: String,
 }
 
 impl App {
@@ -251,6 +255,7 @@ impl App {
             add_project_step: None,
             pending_project_name: String::new(),
             pending_project_short: String::new(),
+            pending_project_url: String::new(),
         }
     }
 
@@ -712,6 +717,7 @@ impl App {
         self.add_project_step = None;
         self.pending_project_name.clear();
         self.pending_project_short.clear();
+        self.pending_project_url.clear();
         // Force a full repaint on the next frame so the prompt overlay cells
         // are cleared even if ratatui's diff renderer would otherwise skip them
         // (e.g. after a tmux window-switch leaves the terminal state stale).

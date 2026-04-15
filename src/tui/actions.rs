@@ -256,16 +256,43 @@ pub fn execute_remove_worktree(app: &mut App) -> Result<()> {
     Ok(())
 }
 
-/// Add a new project via a three-step prompt sequence (name → short → url).
+/// Returns the list of logged-in gh accounts by parsing `gh auth status`.
+fn gh_accounts() -> Vec<String> {
+    let out = std::process::Command::new("gh")
+        .args(["auth", "status"])
+        .output();
+    match out {
+        Ok(o) => {
+            let text = String::from_utf8_lossy(&o.stderr).to_string()
+                + &String::from_utf8_lossy(&o.stdout);
+            text.lines()
+                .filter_map(|l| {
+                    let l = l.trim();
+                    // Lines look like: "✓ Logged in to github.com account sumsar01 (keyring)"
+                    if l.contains("Logged in to") && l.contains("account") {
+                        l.split("account ")
+                            .nth(1)
+                            .map(|s| s.split_whitespace().next().unwrap_or("").to_string())
+                    } else {
+                        None
+                    }
+                })
+                .filter(|s| !s.is_empty())
+                .collect()
+        }
+        Err(_) => vec![],
+    }
+}
+
+/// Add a new project via a four-step prompt sequence (name → short → url → account).
 ///
 /// Called on each Enter press while `Mode::Prompt(ActionKind::AddProject)` is
 /// active.  The current step is tracked in `app.add_project_step`:
 ///
-/// - `Name`  → validates & stores `app.input_buf` into `app.pending_project_name`,
-///             advances step to `Short`, updates status hint.
-/// - `Short` → validates & stores into `app.pending_project_short`,
-///             advances to `Url`, updates status hint.
-/// - `Url`   → runs `cmd_add_project`, reloads registry on success.
+/// - `Name`    → validates & stores into `app.pending_project_name`, advances to `Short`.
+/// - `Short`   → validates & stores into `app.pending_project_short`, advances to `Url`.
+/// - `Url`     → validates & stores into `app.pending_project_url`, advances to `Account`.
+/// - `Account` → runs `cmd_add_project` with the chosen account, reloads registry on success.
 ///
 /// On success the flow resets (`add_project_step = None`, pending fields
 /// cleared).  On any error the flow is cancelled (same reset) and the
@@ -312,15 +339,40 @@ pub fn execute_add_project(app: &mut App) -> Result<()> {
                 app.set_status("Repo URL cannot be empty.");
                 return Ok(());
             }
+            app.pending_project_url = input;
+            app.input_buf.clear();
+            app.cursor_pos = 0;
+            app.add_project_step = Some(AddProjectStep::Account);
+            // Pre-populate input with the first account so user can just hit Enter
+            // for the default, or edit to pick a different one.
+            let accounts = gh_accounts();
+            let hint = if accounts.is_empty() {
+                String::new()
+            } else {
+                accounts.join(" / ")
+            };
+            if let Some(first) = accounts.into_iter().next() {
+                app.input_buf = first.clone();
+                app.cursor_pos = first.len();
+            }
+            app.set_status(format!(
+                "URL saved — enter gh account to clone with ({}): ",
+                hint
+            ));
+        }
+        AddProjectStep::Account => {
+            if input.is_empty() {
+                app.set_status("Account cannot be empty.");
+                return Ok(());
+            }
             let name = app.pending_project_name.clone();
             let short = app.pending_project_short.clone();
-            let url = input;
+            let url = app.pending_project_url.clone();
+            let account = input;
             let base_dir = app.registry.base_dir.clone();
 
-            match crate::cmd_add_project(&base_dir, &name, &short, &url) {
+            match crate::cmd_add_project(&base_dir, &name, &short, &url, Some(&account)) {
                 Ok(()) => {
-                    // Reload the registry so the new project header appears
-                    // immediately without restarting the TUI.
                     match crate::registry::Registry::load(base_dir) {
                         Ok(new_reg) => app.reload_from_registry(new_reg),
                         Err(e) => {

@@ -191,7 +191,7 @@ fn main() -> Result<()> {
     match cli.command {
         // add-project doesn't need an existing registry
         Commands::AddProject { name, short, url } => {
-            cmd_add_project(&base_dir, &name, &short, &url)
+            cmd_add_project(&base_dir, &name, &short, &url, None)
         }
         _ => {
             let registry = Registry::load(base_dir.clone()).context("Failed to load registry")?;
@@ -272,7 +272,13 @@ fn cmd_list(registry: &Registry) -> Result<()> {
 // add-project
 // ---------------------------------------------------------------------------
 
-pub fn cmd_add_project(base_dir: &PathBuf, name: &str, short: &str, url: &str) -> Result<()> {
+pub fn cmd_add_project(
+    base_dir: &PathBuf,
+    name: &str,
+    short: &str,
+    url: &str,
+    account: Option<&str>,
+) -> Result<()> {
     // Check short name not already taken
     let config_path = base_dir.join("task-master.toml");
     if config_path.exists() {
@@ -293,12 +299,38 @@ pub fn cmd_add_project(base_dir: &PathBuf, name: &str, short: &str, url: &str) -
         bail!("Directory already exists: {}", repo_path.display());
     }
 
+    // Resolve token for the requested account (if any) so git clone can authenticate.
+    let token: Option<String> = if let Some(acct) = account {
+        let out = Command::new("gh")
+            .args(["auth", "token", "--user", acct])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            }
+            _ => bail!("Could not retrieve token for gh account '{}'", acct),
+        }
+    } else {
+        None
+    };
+
     info!("Cloning bare repo {} -> {}", url, repo_path.display());
-    let output = Command::new("git")
-        .args(["clone", "--bare", url])
-        .arg(&repo_path)
-        .output()
-        .context("Failed to run git clone")?;
+    let mut cmd = Command::new("git");
+    cmd.args(["clone", "--bare", url]).arg(&repo_path);
+    if let Some(tok) = &token {
+        // GIT_ASKPASS combined with a token via the Authorization header approach,
+        // or simpler: set the credential via the URL with a helper env approach.
+        // The most portable way is to pass the token as HTTPS Basic auth via GIT_TOKEN
+        // and a credential helper override.
+        cmd.env("GIT_TERMINAL_PROMPT", "0");
+        cmd.env("GIT_CONFIG_COUNT", "1");
+        cmd.env("GIT_CONFIG_KEY_0", "http.extraheader");
+        cmd.env(
+            "GIT_CONFIG_VALUE_0",
+            format!("Authorization: Bearer {}", tok),
+        );
+    }
+    let output = cmd.output().context("Failed to run git clone")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

@@ -501,6 +501,9 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
                 Some(AddProjectStep::Url) => {
                     " Add project  ·  Enter git repo URL  ·  Esc to cancel"
                 }
+                Some(AddProjectStep::Account) => {
+                    " Add project  ·  Enter gh account  ·  Esc to cancel"
+                }
                 None => " Add project…  Esc to cancel",
             };
             (hint.to_string(), t.text_dim_style())

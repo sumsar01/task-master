@@ -302,6 +302,8 @@ pub fn cmd_add_project(
     }
 
     // Resolve token for the requested account (if any) so git clone can authenticate.
+    // If no account is specified, fall back to whatever `gh auth git-credential` provides
+    // (the active account) by running a plain clone with no explicit credentials.
     let token: Option<String> = if let Some(acct) = account {
         let out = Command::new("gh")
             .args(["auth", "token", "--user", acct])
@@ -317,25 +319,41 @@ pub fn cmd_add_project(
     };
 
     info!("Cloning bare repo {} -> {}", url, repo_path.display());
+
+    // Build the clone URL. When we have a token, embed it as Basic auth using
+    // the `x-access-token:<token>` scheme, which GitHub accepts for OAuth/PAT
+    // tokens. This avoids the credential-helper entirely and works regardless
+    // of which account is currently active in `gh`.
+    //
+    // We pass GIT_TERMINAL_PROMPT=0 so git fails cleanly instead of hanging on
+    // a password prompt if the token is wrong or the repo doesn't exist.
+    let clone_url: String = if let Some(ref tok) = token {
+        // Insert credentials into the URL: https://x-access-token:TOKEN@host/path
+        if let Some(rest) = url.strip_prefix("https://") {
+            format!("https://x-access-token:{}@{}", tok, rest)
+        } else {
+            // Non-HTTPS URL (SSH, etc.) — pass through unchanged; token unused.
+            url.to_string()
+        }
+    } else {
+        url.to_string()
+    };
+
     let mut cmd = Command::new("git");
-    cmd.args(["clone", "--bare", url]).arg(&repo_path);
-    if let Some(tok) = &token {
-        // GIT_ASKPASS combined with a token via the Authorization header approach,
-        // or simpler: set the credential via the URL with a helper env approach.
-        // The most portable way is to pass the token as HTTPS Basic auth via GIT_TOKEN
-        // and a credential helper override.
-        cmd.env("GIT_TERMINAL_PROMPT", "0");
-        cmd.env("GIT_CONFIG_COUNT", "1");
-        cmd.env("GIT_CONFIG_KEY_0", "http.extraheader");
-        cmd.env(
-            "GIT_CONFIG_VALUE_0",
-            format!("Authorization: Bearer {}", tok),
-        );
-    }
+    cmd.args(["clone", "--bare", &clone_url])
+        .arg(&repo_path)
+        .env("GIT_TERMINAL_PROMPT", "0");
     let output = cmd.output().context("Failed to run git clone")?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr_raw = String::from_utf8_lossy(&output.stderr);
+        // Redact any embedded token from error output so credentials are never
+        // surfaced in the status bar or logs.
+        let stderr = if let Some(ref tok) = token {
+            stderr_raw.replace(tok.as_str(), "<token>")
+        } else {
+            stderr_raw.to_string()
+        };
         // Strip git progress/info lines (start with "Cloning into", "remote:", etc.)
         // and keep only the fatal/error lines that explain what went wrong.
         let error_lines: Vec<&str> = stderr

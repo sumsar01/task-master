@@ -284,19 +284,29 @@ fn gh_accounts() -> Vec<String> {
     }
 }
 
-/// Add a new project via a four-step prompt sequence (name → short → url → account).
+/// Returns distinct sorted values for a string field from all projects.
+fn collect_cycle_options<F>(app: &App, f: F) -> Vec<String>
+where
+    F: Fn(&crate::registry::ProjectConfig) -> Option<&str>,
+{
+    let mut seen = std::collections::HashSet::new();
+    let mut opts: Vec<String> = app
+        .registry
+        .projects
+        .iter()
+        .filter_map(|p| f(p).map(str::to_owned))
+        .filter(|s| seen.insert(s.clone()))
+        .collect();
+    opts.sort();
+    opts
+}
+
+/// Add a new project via a six-step prompt sequence:
+///   Name → Short → URL → Account → Group (optional) → Context (optional)
 ///
-/// Called on each Enter press while `Mode::Prompt(ActionKind::AddProject)` is
-/// active.  The current step is tracked in `app.add_project_step`:
-///
-/// - `Name`    → validates & stores into `app.pending_project_name`, advances to `Short`.
-/// - `Short`   → validates & stores into `app.pending_project_short`, advances to `Url`.
-/// - `Url`     → validates & stores into `app.pending_project_url`, advances to `Account`.
-/// - `Account` → runs `cmd_add_project` with the chosen account, reloads registry on success.
-///
-/// On success the flow resets (`add_project_step = None`, pending fields
-/// cleared).  On any error the flow is cancelled (same reset) and the
-/// error message is shown in the status bar.
+/// Called on each Enter press while `Mode::Prompt(ActionKind::AddProject)` is active.
+/// After the Context step the clone is kicked off in a background thread and
+/// `app.mode` transitions to `Mode::Cloning`.
 pub fn execute_add_project(app: &mut App) -> Result<()> {
     let step = match app.add_project_step.clone() {
         Some(s) => s,
@@ -343,14 +353,9 @@ pub fn execute_add_project(app: &mut App) -> Result<()> {
             app.input_buf.clear();
             app.cursor_pos = 0;
             app.add_project_step = Some(AddProjectStep::Account);
-            // Pre-populate input with the first account so user can just hit Enter
-            // for the default, or edit to pick a different one.
+            // Pre-populate with the first logged-in gh account.
             let accounts = gh_accounts();
-            let hint = if accounts.is_empty() {
-                String::new()
-            } else {
-                accounts.join(" / ")
-            };
+            let hint = accounts.join(" / ");
             if let Some(first) = accounts.into_iter().next() {
                 app.input_buf = first.clone();
                 app.cursor_pos = first.len();
@@ -365,37 +370,92 @@ pub fn execute_add_project(app: &mut App) -> Result<()> {
                 app.set_status("Account cannot be empty.");
                 return Ok(());
             }
+            app.pending_project_account = input;
+            app.input_buf.clear();
+            app.cursor_pos = 0;
+            app.add_project_step = Some(AddProjectStep::Group);
+            // Build cycle options from existing groups.
+            let opts = collect_cycle_options(app, |p| p.group.as_deref());
+            let hint = if opts.is_empty() {
+                "none yet".to_string()
+            } else {
+                opts.join(" / ")
+            };
+            app.group_cycle_options = opts;
+            // Leave input empty — user can Tab to cycle or type a new name.
+            app.set_status(format!(
+                "Enter group (Tab to cycle: {}) or leave empty:",
+                hint
+            ));
+        }
+        AddProjectStep::Group => {
+            // Empty = no group (ungrouped), non-empty = group name.
+            app.pending_project_group = if input.is_empty() { None } else { Some(input) };
+            app.input_buf.clear();
+            app.cursor_pos = 0;
+            app.add_project_step = Some(AddProjectStep::Context);
+            // Build cycle options from existing contexts.
+            let opts = collect_cycle_options(app, |p| p.context.as_deref());
+            let hint = if opts.is_empty() {
+                "none yet".to_string()
+            } else {
+                opts.join(" / ")
+            };
+            app.context_cycle_options = opts;
+            app.set_status(format!(
+                "Enter bounded context (Tab to cycle: {}) or leave empty:",
+                hint
+            ));
+        }
+        AddProjectStep::Context => {
+            // Empty = no context, non-empty = context tag.
+            app.pending_project_context = if input.is_empty() { None } else { Some(input) };
+
+            // All metadata collected — kick off background clone.
             let name = app.pending_project_name.clone();
             let short = app.pending_project_short.clone();
             let url = app.pending_project_url.clone();
-            let account = input;
+            let account = app.pending_project_account.clone();
+            let group = app.pending_project_group.clone();
+            let context = app.pending_project_context.clone();
             let base_dir = app.registry.base_dir.clone();
 
-            match crate::cmd_add_project(&base_dir, &name, &short, &url, Some(&account)) {
-                Ok(()) => {
-                    match crate::registry::Registry::load(base_dir) {
-                        Ok(new_reg) => app.reload_from_registry(new_reg),
-                        Err(e) => {
-                            app.set_status(format!(
-                                "Added project but failed to reload config: {}",
-                                e
-                            ));
-                            app.reset_input();
-                            return Ok(());
-                        }
-                    }
-                    app.set_status(format!(
-                        "Added project {} ({}). Press N to add a worktree.",
-                        name, short
-                    ));
-                    app.reset_input();
-                    app.refresh_phases();
-                }
-                Err(e) => {
-                    app.set_status(format!("Add project failed: {}", e));
-                    app.reset_input();
-                }
-            }
+            // Derive the spinner label before url is moved into the thread.
+            let label = url
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or(&url)
+                .trim_end_matches(".git")
+                .to_string();
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let result = crate::cmd_add_project(
+                    &base_dir,
+                    &name,
+                    &short,
+                    &url,
+                    Some(&account),
+                    group.as_deref(),
+                    context.as_deref(),
+                );
+                let msg = result
+                    .map(|_| {
+                        format!(
+                            "Added project {} ({}). Press N to add a worktree.",
+                            name, short
+                        )
+                    })
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(msg);
+            });
+
+            app.clone_rx = Some(rx);
+            app.cloning_label = format!("Cloning {}…", label);
+            // reset_input clears input/mode fields but we override mode to Cloning.
+            app.reset_input();
+            app.mode = Mode::Cloning;
         }
     }
 

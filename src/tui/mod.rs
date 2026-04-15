@@ -63,9 +63,64 @@ fn run_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut 
             app.needs_full_redraw = false;
             terminal.clear()?;
         }
+
+        // While cloning, poll the result channel and advance the spinner.
+        if app.mode == Mode::Cloning {
+            if let Some(rx) = &app.clone_rx {
+                match rx.try_recv() {
+                    Ok(Ok(msg)) => {
+                        // Clone succeeded — reload registry, show status.
+                        let base_dir = app.registry.base_dir.clone();
+                        match crate::registry::Registry::load(base_dir) {
+                            Ok(new_reg) => app.reload_from_registry(new_reg),
+                            Err(e) => {
+                                app.set_status(format!(
+                                    "Added project but failed to reload config: {}",
+                                    e
+                                ));
+                            }
+                        }
+                        app.set_status(msg);
+                        app.clone_rx = None;
+                        app.cloning_label.clear();
+                        app.mode = Mode::Normal;
+                        app.needs_full_redraw = true;
+                        app.refresh_phases();
+                    }
+                    Ok(Err(err)) => {
+                        // Clone failed — show error.
+                        app.set_status(format!("Add project failed: {}", err));
+                        app.clone_rx = None;
+                        app.cloning_label.clear();
+                        app.mode = Mode::Normal;
+                        app.needs_full_redraw = true;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        // Still running — advance spinner.
+                        app.spinner_frame = app.spinner_frame.wrapping_add(1) % 8;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        // Thread died without sending — treat as error.
+                        app.set_status("Clone thread disconnected unexpectedly.");
+                        app.clone_rx = None;
+                        app.cloning_label.clear();
+                        app.mode = Mode::Normal;
+                        app.needs_full_redraw = true;
+                    }
+                }
+            }
+        }
+
         terminal.draw(|f| render(f, app))?;
 
-        if event::poll(Duration::from_millis(2000))? {
+        // Use a shorter poll timeout while cloning so the spinner animates smoothly.
+        let poll_timeout = if app.mode == Mode::Cloning {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_millis(2000)
+        };
+
+        if event::poll(poll_timeout)? {
             // Collect the first event, then drain any immediately-available
             // follow-on events (zero-timeout poll).  This lets us detect a
             // burst of Key(Char) events that the terminal fired instead of
@@ -93,6 +148,10 @@ fn run_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut 
             }
 
             for ev in events {
+                // Ignore all input while a background clone is running.
+                if app.mode == Mode::Cloning {
+                    continue;
+                }
                 match ev {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
                         input::handle_key(app, key.code, key.modifiers)?;

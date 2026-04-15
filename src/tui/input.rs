@@ -95,6 +95,7 @@ pub fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Resu
         Mode::ConfirmClose => handle_confirm_close(app, code),
         Mode::ConfirmRemoveWorktree => handle_confirm_remove_worktree(app, code),
         Mode::ForceConfirmRemoveWorktree => handle_force_confirm_remove_worktree(app, code),
+        Mode::Cloning => Ok(()), // all input ignored while clone is running
     }
 }
 
@@ -466,6 +467,40 @@ pub fn handle_prompt(
                     app.input_buf = app.input_history[i + 1].clone();
                     app.cursor_pos = app.input_buf.len();
                 }
+            }
+        }
+
+        // ── Tab: cycle through options for Group and Context steps ───────────
+        KeyCode::Tab => {
+            let opts: Option<Vec<String>> = if kind == ActionKind::AddProject {
+                match &app.add_project_step {
+                    Some(AddProjectStep::Group) => {
+                        let mut o = app.group_cycle_options.clone();
+                        o.push(String::new()); // empty = no group
+                        Some(o)
+                    }
+                    Some(AddProjectStep::Context) => {
+                        let mut o = app.context_cycle_options.clone();
+                        o.push(String::new()); // empty = no context
+                        Some(o)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(options) = opts {
+                if options.is_empty() {
+                    return Ok(());
+                }
+                let current = app.input_buf.trim().to_string();
+                let next = options
+                    .iter()
+                    .position(|o| o == &current)
+                    .map(|i| (i + 1) % options.len())
+                    .unwrap_or(0);
+                app.input_buf = options[next].clone();
+                app.cursor_pos = app.input_buf.len();
             }
         }
 

@@ -191,7 +191,7 @@ fn main() -> Result<()> {
     match cli.command {
         // add-project doesn't need an existing registry
         Commands::AddProject { name, short, url } => {
-            cmd_add_project(&base_dir, &name, &short, &url, None)
+            cmd_add_project(&base_dir, &name, &short, &url, None, None, None)
         }
         _ => {
             let registry = Registry::load(base_dir.clone()).context("Failed to load registry")?;
@@ -278,6 +278,8 @@ pub fn cmd_add_project(
     short: &str,
     url: &str,
     account: Option<&str>,
+    group: Option<&str>,
+    context: Option<&str>,
 ) -> Result<()> {
     // Check short name not already taken
     let config_path = base_dir.join("task-master.toml");
@@ -358,9 +360,15 @@ pub fn cmd_add_project(
     // Append [[projects]] block to task-master.toml
     let repo_rel = format!("projects/{}", name);
 
+    let group_line = group
+        .map(|g| format!("group = \"{}\"\n", g))
+        .unwrap_or_default();
+    let context_line = context
+        .map(|c| format!("context = \"{}\"\n", c))
+        .unwrap_or_default();
     let new_block = format!(
-        "\n[[projects]]\nname = \"{}\"\nshort = \"{}\"\nrepo = \"{}\"\n",
-        name, short, repo_rel
+        "\n[[projects]]\nname = \"{}\"\nshort = \"{}\"\nrepo = \"{}\"\n{}{}",
+        name, short, repo_rel, group_line, context_line
     );
 
     let mut contents = if config_path.exists() {

@@ -42,6 +42,10 @@ pub fn render(f: &mut Frame, app: &App, t: &Theme) {
                 Some(AddProjectStep::Short) => (" Add Project — Enter short name ", true),
                 Some(AddProjectStep::Url) => (" Add Project — Enter git repo URL ", true),
                 Some(AddProjectStep::Account) => (" Add Project — Enter gh account ", true),
+                Some(AddProjectStep::Group) => (" Add Project — Enter group (Tab to cycle) ", true),
+                Some(AddProjectStep::Context) => {
+                    (" Add Project — Enter bounded context (Tab to cycle) ", true)
+                }
                 None => return,
             }
         }

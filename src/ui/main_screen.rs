@@ -504,9 +504,23 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
                 Some(AddProjectStep::Account) => {
                     " Add project  ·  Enter gh account  ·  Esc to cancel"
                 }
+                Some(AddProjectStep::Group) => {
+                    " Add project  ·  Enter group or leave empty  ·  Tab to cycle  ·  Esc to cancel"
+                }
+                Some(AddProjectStep::Context) => {
+                    " Add project  ·  Enter bounded context or leave empty  ·  Tab to cycle  ·  Esc to cancel"
+                }
                 None => " Add project…  Esc to cancel",
             };
             (hint.to_string(), t.text_dim_style())
+        }
+        Mode::Cloning => {
+            const FRAMES: [char; 8] = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
+            let ch = FRAMES[app.spinner_frame as usize % 8];
+            (
+                format!(" {} {}", ch, app.cloning_label),
+                t.text_style().fg(t.text_accent),
+            )
         }
         Mode::ForceConfirm => (
             " Press Enter to force-spawn (discards uncommitted changes), Esc to cancel".to_string(),

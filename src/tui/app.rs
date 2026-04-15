@@ -795,6 +795,116 @@ impl App {
         }
     }
 
+    /// Build the list of visual lines for the current `input_buf`, accounting
+    /// for both hard newlines and soft word-wrap at `inner_width`.
+    ///
+    /// Returns `Vec<(byte_start, byte_end)>` — the byte range in `input_buf`
+    /// for each visual line (excluding the newline character itself).
+    fn visual_lines(input: &str, inner_width: usize) -> Vec<(usize, usize)> {
+        let mut result = Vec::new();
+        let mut byte_offset = 0usize;
+
+        for hard_line in input.split('\n') {
+            let hard_len = hard_line.len();
+            let chars: Vec<(usize, char)> = hard_line.char_indices().collect();
+
+            if chars.is_empty() {
+                // Empty hard line → one empty visual line.
+                result.push((byte_offset, byte_offset));
+            } else {
+                let mut visual_start_char = 0usize;
+                while visual_start_char < chars.len() {
+                    let visual_end_char = (visual_start_char + inner_width).min(chars.len());
+                    let vl_byte_start = byte_offset + chars[visual_start_char].0;
+                    let vl_byte_end = if visual_end_char == chars.len() {
+                        byte_offset + hard_len
+                    } else {
+                        byte_offset + chars[visual_end_char].0
+                    };
+                    result.push((vl_byte_start, vl_byte_end));
+                    visual_start_char = visual_end_char;
+                }
+            }
+
+            // +1 for the '\n' separator (not present for the last segment).
+            byte_offset += hard_len + 1;
+        }
+
+        result
+    }
+
+    /// Try to move the cursor up one visual line, preserving the column.
+    ///
+    /// Returns `Some(new_cursor_pos)` on success, or `None` if the cursor is
+    /// already on the first visual line (caller should fall through to history).
+    pub fn move_cursor_up(&self) -> Option<usize> {
+        let inner_width = (self.terminal_width as usize).saturating_sub(2).max(1);
+        let lines = Self::visual_lines(&self.input_buf, inner_width);
+        let cursor = self.cursor_pos.min(self.input_buf.len());
+
+        // Find which visual line the cursor is on.
+        let cur_line_idx = lines
+            .iter()
+            .rposition(|(start, _)| *start <= cursor)
+            .unwrap_or(0);
+
+        if cur_line_idx == 0 {
+            return None; // already on first line — fall through to history
+        }
+
+        // Column = chars from the start of the current visual line to the cursor.
+        let (cur_start, _) = lines[cur_line_idx];
+        let col = self.input_buf[cur_start..cursor].chars().count();
+
+        // Target: same column on the previous visual line (clamped to its length).
+        let (prev_start, prev_end) = lines[cur_line_idx - 1];
+        let prev_line_chars: Vec<(usize, char)> = self.input_buf[prev_start..prev_end]
+            .char_indices()
+            .collect();
+        let new_pos = if col >= prev_line_chars.len() {
+            prev_end
+        } else {
+            prev_start + prev_line_chars[col].0
+        };
+        Some(new_pos)
+    }
+
+    /// Try to move the cursor down one visual line, preserving the column.
+    ///
+    /// Returns `Some(new_cursor_pos)` on success, or `None` if the cursor is
+    /// already on the last visual line (caller should fall through to history).
+    pub fn move_cursor_down(&self) -> Option<usize> {
+        let inner_width = (self.terminal_width as usize).saturating_sub(2).max(1);
+        let lines = Self::visual_lines(&self.input_buf, inner_width);
+        let cursor = self.cursor_pos.min(self.input_buf.len());
+
+        // Find which visual line the cursor is on.
+        let cur_line_idx = lines
+            .iter()
+            .rposition(|(start, _)| *start <= cursor)
+            .unwrap_or(0);
+
+        if cur_line_idx + 1 >= lines.len() {
+            return None; // already on last line — fall through to history
+        }
+
+        // Column = chars from the start of the current visual line to the cursor.
+        let (cur_start, _) = lines[cur_line_idx];
+        let col = self.input_buf[cur_start..cursor].chars().count();
+
+        // Target: same column on the next visual line (clamped to its length).
+        let (next_start, next_end) = lines[cur_line_idx + 1];
+        let next_line_chars: Vec<(usize, char)> = self.input_buf[next_start..next_end]
+            .char_indices()
+            .collect();
+        let new_pos = if col >= next_line_chars.len() {
+            next_end
+        } else {
+            next_start + next_line_chars[col].0
+        };
+        Some(new_pos)
+    }
+
     /// Resolve the project short name from the currently selected entry.    ///
     /// Returns `Some(project_short)` when:
     /// - A `Worktree` row is selected → use that worktree's `project_short`.

@@ -440,39 +440,53 @@ pub fn handle_prompt(
 
         // ── History: Up/Down ──────────────────────────────────────────────────
         KeyCode::Up => {
-            let len = app.input_history.len();
-            if len == 0 {
-                return Ok(());
-            }
-            let new_idx = match app.history_idx {
-                None => {
-                    // Save current draft before browsing.
-                    app.history_draft = app.input_buf.clone();
-                    len - 1
+            // Try vertical cursor movement first; fall through to history only
+            // when already on the first visual line.
+            if let Some(new_pos) = app.move_cursor_up() {
+                app.cursor_pos = new_pos;
+                app.update_prompt_scroll();
+            } else {
+                let len = app.input_history.len();
+                if len == 0 {
+                    return Ok(());
                 }
-                Some(0) => 0,
-                Some(i) => i - 1,
-            };
-            app.history_idx = Some(new_idx);
-            app.input_buf = app.input_history[new_idx].clone();
-            app.cursor_pos = app.input_buf.len();
-            app.update_prompt_scroll();
+                let new_idx = match app.history_idx {
+                    None => {
+                        // Save current draft before browsing.
+                        app.history_draft = app.input_buf.clone();
+                        len - 1
+                    }
+                    Some(0) => 0,
+                    Some(i) => i - 1,
+                };
+                app.history_idx = Some(new_idx);
+                app.input_buf = app.input_history[new_idx].clone();
+                app.cursor_pos = app.input_buf.len();
+                app.update_prompt_scroll();
+            }
         }
         KeyCode::Down => {
-            match app.history_idx {
-                None => {}
-                Some(i) if i + 1 >= app.input_history.len() => {
-                    // Past the end: restore draft.
-                    app.input_buf = app.history_draft.clone();
-                    app.cursor_pos = app.input_buf.len();
-                    app.history_idx = None;
-                    app.update_prompt_scroll();
-                }
-                Some(i) => {
-                    app.history_idx = Some(i + 1);
-                    app.input_buf = app.input_history[i + 1].clone();
-                    app.cursor_pos = app.input_buf.len();
-                    app.update_prompt_scroll();
+            // Try vertical cursor movement first; fall through to history only
+            // when already on the last visual line.
+            if let Some(new_pos) = app.move_cursor_down() {
+                app.cursor_pos = new_pos;
+                app.update_prompt_scroll();
+            } else {
+                match app.history_idx {
+                    None => {}
+                    Some(i) if i + 1 >= app.input_history.len() => {
+                        // Past the end: restore draft.
+                        app.input_buf = app.history_draft.clone();
+                        app.cursor_pos = app.input_buf.len();
+                        app.history_idx = None;
+                        app.update_prompt_scroll();
+                    }
+                    Some(i) => {
+                        app.history_idx = Some(i + 1);
+                        app.input_buf = app.input_history[i + 1].clone();
+                        app.cursor_pos = app.input_buf.len();
+                        app.update_prompt_scroll();
+                    }
                 }
             }
         }

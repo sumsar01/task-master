@@ -87,7 +87,13 @@ pub fn render(f: &mut Frame, app: &App, t: &Theme) {
         hint_spans.extend([
             Span::styled("  ·  ", t.text_dim_style()),
             Span::styled("↑↓", t.key_desc_style()),
-            Span::raw(" history"),
+            Span::raw(" move/history"),
+        ]);
+    } else {
+        hint_spans.extend([
+            Span::styled("  ·  ", t.text_dim_style()),
+            Span::styled("↑↓", t.key_desc_style()),
+            Span::raw(" move"),
         ]);
     }
     hint_spans.extend([

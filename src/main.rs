@@ -302,7 +302,20 @@ pub fn cmd_add_project(base_dir: &PathBuf, name: &str, short: &str, url: &str) -
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = stderr.trim();
+        // Strip git progress/info lines (start with "Cloning into", "remote:", etc.)
+        // and keep only the fatal/error lines that explain what went wrong.
+        let error_lines: Vec<&str> = stderr
+            .lines()
+            .filter(|l| {
+                let l = l.trim();
+                l.starts_with("fatal:") || l.starts_with("error:") || l.starts_with("ERROR:")
+            })
+            .collect();
+        let detail = if error_lines.is_empty() {
+            stderr.trim().to_string()
+        } else {
+            error_lines.join("; ")
+        };
         if detail.is_empty() {
             bail!("git clone failed (exit {})", output.status);
         } else {

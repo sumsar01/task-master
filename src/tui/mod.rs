@@ -3,10 +3,11 @@ mod app;
 mod input;
 
 // Re-export everything external callers depend on.
-pub use app::{ActionKind, AddProjectStep, App, ListEntry, Mode};
+pub use app::{ActionKind, AddProjectStep, App, CloningOp, ListEntry, Mode};
 
 use crate::registry::Registry;
 use crate::tmux;
+use crate::tui::actions::refocus_tui_window;
 use anyhow::{Context, Result};
 use crossterm::{
     event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind},
@@ -69,15 +70,51 @@ fn run_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut 
             if let Some(rx) = &app.clone_rx {
                 match rx.try_recv() {
                     Ok(Ok(msg)) => {
-                        // Clone succeeded — reload registry, show status.
+                        // Background op succeeded — dispatch post-completion actions
+                        // based on which operation was running.
+                        let op = app.cloning_op.clone();
                         let base_dir = app.registry.base_dir.clone();
-                        match crate::registry::Registry::load(base_dir) {
-                            Ok(new_reg) => app.reload_from_registry(new_reg),
-                            Err(e) => {
-                                app.set_status(format!(
-                                    "Added project but failed to reload config: {}",
-                                    e
-                                ));
+                        match op {
+                            CloningOp::AddProject | CloningOp::AddWorktree => {
+                                match crate::registry::Registry::load(base_dir) {
+                                    Ok(new_reg) => app.reload_from_registry(new_reg),
+                                    Err(e) => {
+                                        app.set_status(format!(
+                                            "Operation succeeded but failed to reload config: {}",
+                                            e
+                                        ));
+                                    }
+                                }
+                                refocus_tui_window(&app.session, &app.tui_window_id);
+                                app.refresh_phases();
+                            }
+                            CloningOp::RemoveWorktree => {
+                                match crate::registry::Registry::load(base_dir) {
+                                    Ok(new_reg) => app.reload_from_registry(new_reg),
+                                    Err(e) => {
+                                        app.set_status(format!(
+                                            "Removed worktree but failed to reload config: {}",
+                                            e
+                                        ));
+                                    }
+                                }
+                                app.needs_full_redraw = true;
+                                app.refresh_phases();
+                            }
+                            CloningOp::Spawn => {
+                                refocus_tui_window(&app.session, &app.tui_window_id);
+                                app.refresh_phases();
+                                // Push the prompt into history if we saved it before spawning.
+                                if let Some(entry) = app.pending_history_entry.take() {
+                                    actions::push_history(app, &entry);
+                                }
+                            }
+                            CloningOp::Plan => {
+                                refocus_tui_window(&app.session, &app.tui_window_id);
+                                app.refresh_phases();
+                                if let Some(entry) = app.pending_history_entry.take() {
+                                    actions::push_history(app, &entry);
+                                }
                             }
                         }
                         app.set_status(msg);
@@ -85,13 +122,13 @@ fn run_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut 
                         app.cloning_label.clear();
                         app.mode = Mode::Normal;
                         app.needs_full_redraw = true;
-                        app.refresh_phases();
                     }
                     Ok(Err(err)) => {
-                        // Clone failed — show error.
-                        app.set_status(format!("Add project failed: {}", err));
+                        // Background op failed — show error.
+                        app.set_status(err);
                         app.clone_rx = None;
                         app.cloning_label.clear();
+                        app.pending_history_entry = None;
                         app.mode = Mode::Normal;
                         app.needs_full_redraw = true;
                     }
@@ -101,9 +138,10 @@ fn run_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut 
                     }
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         // Thread died without sending — treat as error.
-                        app.set_status("Clone thread disconnected unexpectedly.");
+                        app.set_status("Background operation thread disconnected unexpectedly.");
                         app.clone_rx = None;
                         app.cloning_label.clear();
+                        app.pending_history_entry = None;
                         app.mode = Mode::Normal;
                         app.needs_full_redraw = true;
                     }

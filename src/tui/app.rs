@@ -223,13 +223,37 @@ pub struct App {
     pub context_cycle_options: Vec<String>,
 
     // ── Background clone state ────────────────────────────────────────────────
-    /// Receives the result of a background git-clone spawned during add-project.
+    /// Receives the result of a background operation spawned in Mode::Cloning.
     /// `Some` while `Mode::Cloning` is active; `None` otherwise.
     pub clone_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     /// Human-readable label shown next to the spinner, e.g. "Cloning my-service…".
     pub cloning_label: String,
     /// Current frame index for the braille spinner (0–7, wraps).
     pub spinner_frame: u8,
+    /// Which background operation is running (determines post-completion actions).
+    pub cloning_op: CloningOp,
+    /// When Some, holds the prompt text to push into input_history after a
+    /// background spawn operation completes successfully.
+    pub pending_history_entry: Option<String>,
+}
+
+/// Discriminant for the background operation running in `Mode::Cloning`.
+///
+/// The `run_loop` handler in `tui/mod.rs` branches on this to decide which
+/// post-completion actions to take (reload registry, refresh phases, etc.).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum CloningOp {
+    /// `add-project` git clone — reload registry, refocus TUI window.
+    #[default]
+    AddProject,
+    /// `add-worktree` — reload registry, refocus TUI window.
+    AddWorktree,
+    /// `remove-worktree` — reload registry, set needs_full_redraw.
+    RemoveWorktree,
+    /// `spawn` — refresh phases, refocus TUI window, push history entry.
+    Spawn,
+    /// `plan` — refresh phases, refocus TUI window.
+    Plan,
 }
 
 impl App {
@@ -307,6 +331,8 @@ impl App {
             clone_rx: None,
             cloning_label: String::new(),
             spinner_frame: 0,
+            cloning_op: CloningOp::AddProject,
+            pending_history_entry: None,
         }
     }
 

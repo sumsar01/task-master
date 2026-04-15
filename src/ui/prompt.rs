@@ -49,6 +49,7 @@ pub fn render(f: &mut Frame, app: &App, t: &Theme) {
                 None => return,
             }
         }
+        Mode::Prompt(ActionKind::SpawnEphemeral) => (" Spawn Ephemeral — Enter task prompt ", true),
         _ => return,
     };
 

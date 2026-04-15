@@ -30,9 +30,18 @@ theme = "tokyonight"
 #               these values into the bare repo's git config so all linked worktrees inherit
 #               the correct identity automatically.  Run `task-master fix-git-identity` once
 #               to apply the values to existing bare repos.
+#   ephemeral_prefix        — (optional) word prefix for auto-generated ephemeral worktree
+#               names used by `task-master spawn --ephemeral`.
+#               E.g. "spruce" produces names like "SVC-spruce-7f3a".
+#               When absent, a random word from the built-in adjective list is used.
+#   ephemeral_branch_prefix — (optional) branch prefix for ephemeral branches.
+#               Defaults to "feat/" when absent.
+#               E.g. with the default, "spruce-7f3a" → branch "feat/spruce-7f3a".
 #
 # Each [[projects.worktrees]] block registers one worktree inside that repo.
-#   name   — worktree directory name; also becomes the window suffix
+#   name      — worktree directory name; also becomes the window suffix
+#   ephemeral — (written automatically by spawn --ephemeral) marks this worktree for
+#               cleanup via `task-master cleanup --merged` once its branch is merged.
 
 [[projects]]
 name = "my-service"
@@ -40,6 +49,8 @@ short = "SVC"
 repo = "projects/my-service"
 group = "Whiteaway"                 # super-group shown in TUI
 context = "delivery-and-logistics"  # bounded-context tag (for future filtering)
+# ephemeral_prefix = "spruce"       # word prefix for spawn --ephemeral names
+# ephemeral_branch_prefix = "feat/" # branch prefix for ephemeral branches (default: "feat/")
 
   [[projects.worktrees]]
   name = "main"

@@ -8,6 +8,11 @@ use toml_edit::DocumentMut;
 #[derive(Debug, Deserialize, Clone)]
 pub struct WorktreeConfig {
     pub name: String,
+    /// Whether this worktree was created ephemerally (via `spawn --ephemeral`).
+    /// Ephemeral worktrees are candidates for automatic cleanup after their
+    /// branch is merged or the PR is closed.
+    #[serde(default)]
+    pub ephemeral: bool,
 }
 
 fn default_collapsed() -> bool {
@@ -53,6 +58,16 @@ pub struct ProjectConfig {
     /// Optional git `user.email` override — see `git_name` for details.
     #[serde(default)]
     pub git_email: Option<String>,
+    /// Optional word prefix for auto-generated ephemeral worktree names.
+    /// E.g. "spruce" produces names like "spruce-7f3a".
+    /// When absent, a random word is chosen from the built-in adjective list.
+    #[serde(default)]
+    pub ephemeral_prefix: Option<String>,
+    /// Optional branch prefix for auto-generated ephemeral branches.
+    /// Defaults to "feat/" when absent.
+    /// E.g. "spruce-7f3a" becomes branch "feat/spruce-7f3a".
+    #[serde(default)]
+    pub ephemeral_branch_prefix: Option<String>,
 }
 
 fn default_theme() -> String {
@@ -97,6 +112,8 @@ pub struct Worktree {
     pub project_short: String,
     /// Full name of the parent project, e.g. "warehouse-integration-service"
     pub project_name: String,
+    /// Whether this worktree was created ephemerally (via `spawn --ephemeral`).
+    pub ephemeral: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +152,7 @@ impl Registry {
                     abs_path,
                     project_short: project.short.clone(),
                     project_name: project.name.clone(),
+                    ephemeral: wt.ephemeral,
                 });
             }
         }
@@ -740,5 +758,76 @@ Personal = false
             Some(&false),
             "Personal should be untouched"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // ephemeral fields
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_worktree_ephemeral_defaults_to_false() {
+        let reg = registry_from_toml(SIMPLE_TOML).unwrap();
+        for wt in &reg.worktrees {
+            assert!(
+                !wt.ephemeral,
+                "ephemeral should default to false for worktree '{}'",
+                wt.window_name
+            );
+        }
+    }
+
+    #[test]
+    fn test_worktree_ephemeral_true_is_loaded() {
+        let toml = r#"
+[[projects]]
+name = "my-service"
+short = "SVC"
+repo = "projects/my-service"
+
+[[projects.worktrees]]
+name = "spruce-7f3a"
+ephemeral = true
+
+[[projects.worktrees]]
+name = "main"
+"#;
+        let reg = registry_from_toml(toml).unwrap();
+        let spruce = reg.find_worktree("SVC-spruce-7f3a").unwrap();
+        assert!(spruce.ephemeral, "ephemeral should be true for spruce-7f3a");
+        let main = reg.find_worktree("SVC-main").unwrap();
+        assert!(!main.ephemeral, "ephemeral should be false for main");
+    }
+
+    #[test]
+    fn test_project_ephemeral_prefix_and_branch_prefix_loaded() {
+        let toml = r#"
+[[projects]]
+name = "my-service"
+short = "SVC"
+repo = "projects/my-service"
+ephemeral_prefix = "spruce"
+ephemeral_branch_prefix = "feat/"
+"#;
+        let reg = registry_from_toml(toml).unwrap();
+        let proj = &reg.projects[0];
+        assert_eq!(proj.ephemeral_prefix, Some("spruce".to_string()));
+        assert_eq!(proj.ephemeral_branch_prefix, Some("feat/".to_string()));
+    }
+
+    #[test]
+    fn test_project_ephemeral_fields_absent_default_to_none() {
+        let reg = registry_from_toml(SIMPLE_TOML).unwrap();
+        for proj in &reg.projects {
+            assert!(
+                proj.ephemeral_prefix.is_none(),
+                "ephemeral_prefix should default to None for project '{}'",
+                proj.name
+            );
+            assert!(
+                proj.ephemeral_branch_prefix.is_none(),
+                "ephemeral_branch_prefix should default to None for project '{}'",
+                proj.name
+            );
+        }
     }
 }

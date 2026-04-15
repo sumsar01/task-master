@@ -270,8 +270,22 @@ fn render_actions(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
     lines.push(action_line('a', "attach", has_wt, !active, t));
     lines.push(action_line('c', "close window", has_wt, false, t));
     lines.push(Line::from(""));
-    lines.push(action_line('N', "new worktree", has_wt, false, t));
+    lines.push(action_line('N', "new named worktree", has_wt, false, t));
+    lines.push(action_line(
+        'E',
+        "spawn ephemeral worktree",
+        has_wt,
+        false,
+        t,
+    ));
     lines.push(action_line('D', "remove worktree", has_wt, !has_wt, t));
+    lines.push(action_line(
+        'X',
+        "cleanup merged ephemerals",
+        true,
+        false,
+        t,
+    ));
     lines.push(Line::from(""));
     lines.push(action_line('P', "add project", true, false, t));
     lines.push(action_line('v', "supervise", true, false, t));
@@ -522,6 +536,11 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
                 t.text_style().fg(t.text_accent),
             )
         }
+        Mode::Prompt(crate::tui::ActionKind::SpawnEphemeral) => (
+            " Task prompt for ephemeral worktree…  Esc to cancel".to_string(),
+            t.text_dim_style(),
+        ),
+        Mode::ConfirmCleanup => (String::new(), t.text_dim_style()),
         Mode::ForceConfirm => (
             " Press Enter to force-spawn (discards uncommitted changes), Esc to cancel".to_string(),
             t.text_style().fg(t.phase_error),

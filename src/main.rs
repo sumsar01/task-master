@@ -1,9 +1,11 @@
+mod cleanup;
 mod e2e;
 mod hooks;
 mod notify;
 mod plan;
 mod qa;
 mod registry;
+mod slug;
 mod spawn;
 mod stats;
 mod status;
@@ -36,13 +38,18 @@ struct Cli {
 enum Commands {
     /// Spawn an opencode agent in a new tmux window for the given worktree
     Spawn {
-        /// Worktree window name, e.g. WIS-olive
+        /// Worktree window name (e.g. WIS-olive) or project short name when --ephemeral is set (e.g. WIS)
         worktree: String,
         /// Prompt / task description to pass to the agent
         prompt: String,
         /// Reset the worktree even if it has uncommitted changes (discards all local modifications)
         #[arg(long, default_value_t = false)]
         force: bool,
+        /// Automatically create a temporary worktree, spawn the agent in it, and register it for
+        /// cleanup once the branch is merged. Pass a project short name (e.g. WIS) instead of a
+        /// full window name. A unique name like WIS-spruce-7f3a is generated automatically.
+        #[arg(long, default_value_t = false)]
+        ephemeral: bool,
     },
     /// Spawn a planning agent to decompose a task into beads issues
     Plan {
@@ -131,6 +138,28 @@ enum Commands {
         /// Force removal even if a tmux window is active
         #[arg(long)]
         force: bool,
+        /// Skip deleting the remote branch (default: delete it for feature branches)
+        #[arg(long)]
+        keep_branch: bool,
+    },
+    /// Remove ephemeral worktrees whose branch has been merged or PR closed.
+    ///
+    /// Scans all worktrees marked `ephemeral = true` in task-master.toml, checks
+    /// whether their branch is merged (via gh CLI), and removes the ones that are done.
+    /// Also deletes the remote branch for each removed worktree.
+    ///
+    /// Use --all to remove all ephemeral worktrees regardless of merge status (requires
+    /// --force to skip the confirmation prompt).
+    Cleanup {
+        /// Only remove worktrees whose branch is merged or PR is closed (default behaviour)
+        #[arg(long, default_value_t = false)]
+        merged: bool,
+        /// Remove all ephemeral worktrees regardless of merge status
+        #[arg(long, default_value_t = false)]
+        all: bool,
+        /// Skip confirmation prompts (required when using --all non-interactively)
+        #[arg(long, default_value_t = false)]
+        force: bool,
     },
     /// Open the interactive TUI dashboard
     Tui,
@@ -200,8 +229,16 @@ fn main() -> Result<()> {
                     worktree,
                     prompt,
                     force,
-                } => spawn::cmd_spawn(&registry, &worktree, &prompt, force)
-                    .map(|msg| println!("{}", msg)),
+                    ephemeral,
+                } => {
+                    if ephemeral {
+                        spawn::cmd_spawn_ephemeral(&registry, &base_dir, &worktree, &prompt)
+                            .map(|msg| println!("{}", msg))
+                    } else {
+                        spawn::cmd_spawn(&registry, &worktree, &prompt, force)
+                            .map(|msg| println!("{}", msg))
+                    }
+                }
                 Commands::Plan { worktree, prompt } => {
                     plan::cmd_plan(&registry, &worktree, &prompt).map(|msg| println!("{}", msg))
                 }
@@ -240,8 +277,19 @@ fn main() -> Result<()> {
                 Commands::Supervise => supervise::cmd_supervise(&registry),
                 Commands::Status => status::cmd_status(&registry),
                 Commands::Stats { days } => stats::cmd_stats(&registry, days),
-                Commands::RemoveWorktree { worktree, force } => {
-                    worktree::cmd_remove_worktree(&registry, &base_dir, &worktree, force)
+                Commands::RemoveWorktree {
+                    worktree,
+                    force,
+                    keep_branch,
+                } => worktree::cmd_remove_worktree(
+                    &registry,
+                    &base_dir,
+                    &worktree,
+                    force,
+                    keep_branch,
+                ),
+                Commands::Cleanup { merged, all, force } => {
+                    cleanup::cmd_cleanup(&registry, &base_dir, merged, all, force)
                 }
                 Commands::Tui => tui::cmd_tui(&registry),
                 Commands::FixGitIdentity => worktree::cmd_fix_git_identity(&registry, &base_dir)

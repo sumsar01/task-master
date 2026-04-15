@@ -96,6 +96,7 @@ pub fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Resu
         Mode::ConfirmRemoveWorktree => handle_confirm_remove_worktree(app, code),
         Mode::ForceConfirmRemoveWorktree => handle_force_confirm_remove_worktree(app, code),
         Mode::Cloning => Ok(()), // all input ignored while clone is running
+        Mode::ConfirmCleanup => handle_confirm_cleanup(app, code),
     }
 }
 
@@ -315,7 +316,18 @@ fn handle_normal(app: &mut App, code: KeyCode) -> Result<()> {
             }
             app.mode = Mode::ConfirmClose;
         }
-        // ── Add ephemeral worktree ────────────────────────────────────────────
+        // ── Spawn ephemeral worktree ──────────────────────────────────────────
+        KeyCode::Char('E') if !is_burst => {
+            if app.selected_project_short().is_none() {
+                app.set_status("Select a project or worktree first (use j/k to navigate).");
+                return Ok(());
+            }
+            app.input_buf.clear();
+            app.cursor_pos = 0;
+            app.set_status("Type agent task prompt and press Enter to spawn ephemeral worktree (Esc to cancel).");
+            app.mode = Mode::Prompt(ActionKind::SpawnEphemeral);
+        }
+        // ── Add named worktree ────────────────────────────────────────────────
         KeyCode::Char('N') if !is_burst => {
             if app.selected_project_short().is_none() {
                 app.set_status("Select a project or worktree first (use j/k to navigate).");
@@ -339,6 +351,11 @@ fn handle_normal(app: &mut App, code: KeyCode) -> Result<()> {
             app.add_project_step = Some(AddProjectStep::Name);
             app.mode = Mode::Prompt(ActionKind::AddProject);
             app.set_status("Enter project full name (e.g. warehouse-integration-service):");
+        }
+        // ── Cleanup merged ephemeral worktrees ────────────────────────────────
+        KeyCode::Char('X') if !is_burst => {
+            app.set_status("Remove all merged ephemeral worktrees? [y/N]");
+            app.mode = Mode::ConfirmCleanup;
         }
         _ => {}
     }
@@ -606,6 +623,20 @@ fn handle_force_confirm_remove_worktree(app: &mut App, code: KeyCode) -> Result<
             super::actions::execute_force_remove_worktree(app)?;
         }
         _ => {}
+    }
+    Ok(())
+}
+
+fn handle_confirm_cleanup(app: &mut App, code: KeyCode) -> Result<()> {
+    match code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            super::actions::execute_cleanup_merged(app)?;
+        }
+        _ => {
+            app.mode = Mode::Normal;
+            app.status_msg = None;
+            app.needs_full_redraw = true;
+        }
     }
     Ok(())
 }

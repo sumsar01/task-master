@@ -51,10 +51,13 @@ pub enum ActionKind {
     Plan,
     Qa,
     Send,
-    /// User typed a new worktree name; Enter calls execute_add_worktree.
+    /// User typed a new (named) worktree name; Enter calls execute_add_worktree.
     AddWorktree,
     /// Multi-step prompt for adding a new project (name → short → url).
     AddProject,
+    /// User typed an agent task prompt; Enter calls execute_spawn_ephemeral
+    /// (worktree name is auto-generated).
+    SpawnEphemeral,
 }
 
 /// Tracks which input step the add-project flow is on.
@@ -89,6 +92,8 @@ pub enum Mode {
     /// A long-running clone is running in a background thread.
     /// The TUI shows an animated spinner and ignores all key input until done.
     Cloning,
+    /// Confirm-cleanup modal: user pressed 'X', waiting for 'y' or any other key.
+    ConfirmCleanup,
 }
 
 pub struct App {

@@ -19,6 +19,7 @@ pub fn execute_action(app: &mut App, kind: &ActionKind, force: bool) -> Result<(
         ActionKind::Send => execute_send(app),
         ActionKind::AddWorktree => execute_add_worktree(app),
         ActionKind::AddProject => execute_add_project(app),
+        ActionKind::SpawnEphemeral => execute_spawn_ephemeral(app),
     }
 }
 
@@ -217,7 +218,8 @@ pub fn execute_remove_worktree(app: &mut App) -> Result<()> {
     };
 
     let base_dir = app.registry.base_dir.clone();
-    match crate::worktree::cmd_remove_worktree(&app.registry, &base_dir, &window_name, false) {
+    match crate::worktree::cmd_remove_worktree(&app.registry, &base_dir, &window_name, false, false)
+    {
         Ok(()) => {
             // Reload the registry from disk so the removed row disappears
             // and all subsequent actions use the updated state.
@@ -471,7 +473,8 @@ pub fn execute_force_remove_worktree(app: &mut App) -> Result<()> {
     };
 
     let base_dir = app.registry.base_dir.clone();
-    match crate::worktree::cmd_remove_worktree(&app.registry, &base_dir, &window_name, true) {
+    match crate::worktree::cmd_remove_worktree(&app.registry, &base_dir, &window_name, true, false)
+    {
         Ok(()) => {
             match crate::registry::Registry::load(base_dir) {
                 Ok(new_reg) => app.reload_from_registry(new_reg),
@@ -552,4 +555,99 @@ pub fn attach_to_window(session: &str, base_name: &str, full_name: &str) {
             .status()
             .ok();
     }
+}
+
+// ---------------------------------------------------------------------------
+// Ephemeral spawn
+// ---------------------------------------------------------------------------
+
+/// Spawn an agent in a freshly created ephemeral worktree.
+///
+/// The project is inferred from the selected row (Worktree → its project;
+/// ProjectHeader → that project). The worktree name is auto-generated; the
+/// user only supplies the agent task prompt.
+pub fn execute_spawn_ephemeral(app: &mut App) -> Result<()> {
+    let project_short = match app.selected_project_short() {
+        Some(s) => s,
+        None => {
+            app.set_status("Select a project or worktree first (use j/k to navigate).");
+            return Ok(());
+        }
+    };
+
+    let prompt = app.input_buf.trim().to_string();
+    if prompt.is_empty() {
+        app.set_status("Prompt cannot be empty.");
+        return Ok(());
+    }
+
+    push_history(app, &prompt);
+    app.reset_input();
+
+    let base_dir = app.registry.base_dir.clone();
+    match crate::spawn::cmd_spawn_ephemeral(&app.registry, &base_dir, &project_short, &prompt) {
+        Ok(msg) => {
+            match crate::registry::Registry::load(base_dir) {
+                Ok(new_reg) => app.reload_from_registry(new_reg),
+                Err(e) => {
+                    app.set_status(format!(
+                        "Spawned ephemeral worktree but failed to reload config: {}",
+                        e
+                    ));
+                    app.mode = Mode::Normal;
+                    app.needs_full_redraw = true;
+                    return Ok(());
+                }
+            }
+            refocus_tui_window(&app.session, &app.tui_window_id);
+            app.mode = Mode::Normal;
+            // Show first line of cmd_spawn_ephemeral's success message (avoids multi-line status).
+            let short_msg = msg.lines().next().unwrap_or(&msg).to_string();
+            app.set_status(short_msg);
+            app.needs_full_redraw = true;
+            app.refresh_phases();
+        }
+        Err(e) => {
+            app.mode = Mode::Normal;
+            app.set_status(format!("Ephemeral spawn failed: {}", e));
+            app.needs_full_redraw = true;
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Cleanup merged ephemeral worktrees
+// ---------------------------------------------------------------------------
+
+/// Remove all ephemeral worktrees whose branch is merged or PR is closed.
+///
+/// Called after the user confirms with 'y' from `ConfirmCleanup` mode.
+/// Always runs with `force = true` (non-interactive; the TUI modal already
+/// obtained confirmation).
+pub fn execute_cleanup_merged(app: &mut App) -> Result<()> {
+    let base_dir = app.registry.base_dir.clone();
+    match crate::cleanup::cmd_cleanup(&app.registry, &base_dir, true, false, true) {
+        Ok(()) => {
+            match crate::registry::Registry::load(base_dir) {
+                Ok(new_reg) => app.reload_from_registry(new_reg),
+                Err(e) => {
+                    app.set_status(format!("Cleanup ran but failed to reload config: {}", e));
+                    app.mode = Mode::Normal;
+                    app.needs_full_redraw = true;
+                    return Ok(());
+                }
+            }
+            app.mode = Mode::Normal;
+            app.set_status("Cleanup complete — merged ephemeral worktrees removed.");
+            app.needs_full_redraw = true;
+            app.refresh_phases();
+        }
+        Err(e) => {
+            app.mode = Mode::Normal;
+            app.set_status(format!("Cleanup failed: {}", e));
+            app.needs_full_redraw = true;
+        }
+    }
+    Ok(())
 }

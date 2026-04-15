@@ -54,8 +54,11 @@ pub enum ActionKind {
     Plan,
     Qa,
     Send,
-    /// User typed a new worktree name; Enter calls execute_add_worktree.
+    /// User typed a new (named) worktree name; Enter calls execute_add_worktree.
     AddWorktree,
+    /// User typed an agent task prompt; Enter calls execute_spawn_ephemeral
+    /// (worktree name is auto-generated).
+    SpawnEphemeral,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -70,6 +73,8 @@ pub enum Mode {
     ConfirmRemoveWorktree,
     /// Remove worktree has modified files: user confirmed once, Enter force-removes, Esc cancels.
     ForceConfirmRemoveWorktree,
+    /// Confirm-cleanup modal: user pressed 'X', waiting for 'y' or any other key.
+    ConfirmCleanup,
 }
 
 pub struct App {

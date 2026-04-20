@@ -52,12 +52,8 @@ pub fn reset_worktree_to_master(path: &Path, force: bool) -> Result<()> {
     }
 
     // 2. Fetch latest from remote (non-fatal).
-    if !git_ok(&["fetch", "origin"])? {
-        eprintln!(
-            "Warning: git fetch failed in '{}'; will reset to local branch tip.",
-            path.display()
-        );
-    }
+    // NOTE: we do NOT fetch here globally — instead we fetch the specific branch
+    // inside reset_to_master so that FETCH_HEAD is reliably set to that branch.
 
     // 3. Reset to master (or main) at origin.
     //
@@ -65,23 +61,39 @@ pub fn reset_worktree_to_master(path: &Path, force: bool) -> Result<()> {
     //             worktree is already on that branch (bare repo case where the branch
     //             isn't locked by another worktree).
     // Strategy B: if checkout fails (e.g. bare repo — "branch already used by worktree"),
-    //             fall back to `git reset --hard origin/<branch>`, which resets content
-    //             without needing to switch the branch name.
+    //             fall back to `git reset --hard FETCH_HEAD`.
+    //
+    // We fetch `origin <branch>` explicitly (not just `origin`) so that FETCH_HEAD is
+    // written with the correct ref even in linked worktrees that have no configured
+    // remote-tracking refspecs.  Using FETCH_HEAD instead of `origin/<branch>` avoids
+    // the symbolic-ref resolution failure that occurs when the remote-tracking ref has
+    // not been written into the shared object store.
     let reset_to_master = |branch: &str| -> Result<bool> {
+        // Fetch the specific branch so FETCH_HEAD is set correctly (non-fatal).
+        let fetched = git_ok(&["fetch", "origin", branch])?;
+        if !fetched {
+            eprintln!(
+                "Warning: git fetch origin {} failed in '{}'; will try local tip.",
+                branch,
+                path.display()
+            );
+        }
+
         // Try direct checkout first.
         if git_ok(&["checkout", branch])? {
-            // Bring the branch up to date with origin now that we fetched.
-            if !git_ok(&["reset", "--hard", &format!("origin/{}", branch)])? {
+            // Bring the branch up to date using FETCH_HEAD (avoids origin/<branch>
+            // symbolic-ref resolution issues in linked worktrees).
+            if fetched && !git_ok(&["reset", "--hard", "FETCH_HEAD"])? {
                 eprintln!(
-                    "Warning: git reset --hard origin/{} failed; using local tip.",
+                    "Warning: git reset --hard FETCH_HEAD failed after checkout {}; using local tip.",
                     branch
                 );
             }
             return Ok(true);
         }
-        // Checkout failed — try hard-reset to remote ref (bare-repo worktree path).
-        let remote_ref = format!("origin/{}", branch);
-        if git_ok(&["reset", "--hard", &remote_ref])? {
+        // Checkout failed (e.g. branch locked by another worktree) — hard-reset to
+        // FETCH_HEAD so the working tree content matches origin without switching branches.
+        if fetched && git_ok(&["reset", "--hard", "FETCH_HEAD"])? {
             return Ok(true);
         }
         // Neither worked for this branch name.

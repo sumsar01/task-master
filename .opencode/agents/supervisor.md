@@ -1,6 +1,6 @@
 ---
 description: Monitors worktree windows and drives phase transitions based on what agents are doing
-mode: primary
+mode: subagent
 model: github-copilot/claude-haiku-4.5
 temperature: 0.1
 permission:

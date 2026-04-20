@@ -291,6 +291,7 @@ fn render_actions(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
     lines.push(Line::from(""));
     lines.push(action_line('x', "qa  (enter PR #)", has_wt, !active, t));
     lines.push(action_line('m', "send message", has_wt, !active, t));
+    lines.push(action_line('b', "send (build mode)", has_wt, !active, t));
     lines.push(Line::from(""));
     lines.push(action_line('r', "reset window", has_wt, !active, t));
     lines.push(action_line('a', "attach", has_wt, !active, t));
@@ -525,6 +526,10 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
         }
         Mode::Prompt(crate::tui::ActionKind::Send) => (
             " Send message…  Esc to cancel".to_string(),
+            t.text_dim_style(),
+        ),
+        Mode::Prompt(crate::tui::ActionKind::SendBuild) => (
+            " Send message (build mode)…  Esc to cancel".to_string(),
             t.text_dim_style(),
         ),
         Mode::Prompt(crate::tui::ActionKind::AddWorktree) => (

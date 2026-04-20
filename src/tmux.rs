@@ -187,6 +187,29 @@ pub fn send_to_window(session: &str, base_name: &str, prompt: &str) -> Result<()
     Ok(())
 }
 
+/// Send a Tab keypress to switch the opencode session to the next primary agent,
+/// then send a prompt to it.
+///
+/// Used to switch from plan mode to build mode: after TM-r0u, the only project-
+/// defined primary agents are `plan` and `build`, so one Tab press from plan
+/// reliably lands on build.
+///
+/// Finds the window by base name (ignoring any phase suffix), sends Tab, then
+/// the prompt text followed by Enter.
+pub fn send_tab_then_message(session: &str, base_name: &str, prompt: &str) -> Result<()> {
+    let idx = find_window_index(session, base_name).with_context(|| {
+        format!(
+            "No tmux window found for '{}' in session '{}'. Is an opencode session running?",
+            base_name, session
+        )
+    })?;
+    let target = format!("{}:{}", session, idx);
+    tmux(&["send-keys", "-t", &target, "Tab"])?;
+    tmux(&["send-keys", "-t", &target, prompt])?;
+    tmux(&["send-keys", "-t", &target, "Enter"])?;
+    Ok(())
+}
+
 /// Spawn an opencode agent for a worktree.
 ///
 /// `window_name` must be the **base** name (no phase suffix), e.g. "WIS-olive".

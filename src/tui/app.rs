@@ -51,6 +51,10 @@ pub enum ActionKind {
     Plan,
     Qa,
     Send,
+    /// User typed a message; Enter sends it to the running opencode session and
+    /// switches it to build mode first (via a Tab keypress) if the window is
+    /// currently in the plan phase.
+    SendBuild,
     /// User typed a new (named) worktree name; Enter calls execute_add_worktree.
     AddWorktree,
     /// Multi-step prompt for adding a new project (name → short → url).

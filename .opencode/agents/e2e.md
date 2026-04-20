@@ -1,6 +1,6 @@
 ---
 description: E2e validation agent — validates a deployed PR against staging and fixes any issues
-mode: primary
+mode: subagent
 model: github-copilot/claude-sonnet-4.6
 temperature: 0.2
 permission:

@@ -253,6 +253,17 @@ fn handle_normal(app: &mut App, code: KeyCode) -> Result<()> {
             app.input_buf.clear();
             app.mode = Mode::Prompt(ActionKind::Send);
         }
+        KeyCode::Char('b') if !is_burst => {
+            let phase = app.selected_phase().to_string();
+            if !app.require_worktree_selected() {
+                return Ok(());
+            }
+            if !App::is_active_phase(&phase) {
+                return Ok(());
+            }
+            app.input_buf.clear();
+            app.mode = Mode::Prompt(ActionKind::SendBuild);
+        }
         KeyCode::Char('r') if !is_burst => {
             let phase = app.selected_phase().to_string();
             if !app.require_worktree_selected() {

@@ -17,6 +17,7 @@ pub fn execute_action(app: &mut App, kind: &ActionKind, force: bool) -> Result<(
         ActionKind::Plan => execute_plan(app),
         ActionKind::Qa => execute_qa(app),
         ActionKind::Send => execute_send(app),
+        ActionKind::SendBuild => execute_send_build(app),
         ActionKind::AddWorktree => execute_add_worktree(app),
         ActionKind::AddProject => execute_add_project(app),
         ActionKind::SpawnEphemeral => execute_spawn_ephemeral(app),
@@ -198,6 +199,78 @@ pub fn execute_send(app: &mut App) -> Result<()> {
             app.set_status(format!("Send failed: {}", e));
             app.reset_input();
         }
+    }
+    Ok(())
+}
+
+/// Send a message to the running opencode session, switching to build mode first
+/// if the worktree is currently in plan phase.
+///
+/// - If the window phase is "plan": sends a Tab keypress (cycles opencode from
+///   plan → build agent) followed by the prompt, then renames the window to :dev.
+/// - If the window phase is "dev" (already build mode): sends the prompt directly,
+///   same as execute_send.
+/// - Any other active phase: shows an error; the user should use 'm' (Send) instead.
+///
+/// Relies on qa/supervisor/e2e agents having mode: subagent so that Tab cycling
+/// only alternates between the two project-defined primary agents: build and plan.
+pub fn execute_send_build(app: &mut App) -> Result<()> {
+    let wt_name = match app.selected_worktree() {
+        Some(wt) => wt.window_name.clone(),
+        None => return Ok(()),
+    };
+    let prompt = app.input_buf.trim().to_string();
+    if prompt.is_empty() {
+        app.set_status("Message is empty — type something first.");
+        return Ok(());
+    }
+    let phase = app.selected_phase().to_string();
+    let session = match crate::tmux::current_session() {
+        Ok(s) => s,
+        Err(e) => {
+            app.set_status(format!("Send (build) failed: {}", e));
+            app.reset_input();
+            return Ok(());
+        }
+    };
+    if phase == "plan" {
+        // Tab switches opencode from plan → build agent, then send the message.
+        match crate::tmux::send_tab_then_message(&session, &wt_name, &prompt) {
+            Ok(()) => {
+                // Rename the window from :plan to :dev to reflect the new mode.
+                let _ = crate::tmux::set_window_phase(&session, &wt_name, Some("dev"));
+                let _ = tmux::select_window_by_id(&app.session, &app.tui_window_id);
+                app.set_status(format!("Switched to build mode and sent message to {}.", wt_name));
+                push_history(app, &prompt);
+                app.reset_input();
+                app.refresh_phases();
+            }
+            Err(e) => {
+                app.set_status(format!("Send (build) failed: {}", e));
+                app.reset_input();
+            }
+        }
+    } else if phase == "dev" {
+        // Already in build mode — just send normally.
+        match crate::cmd_send(&app.registry, &wt_name, &prompt) {
+            Ok(()) => {
+                let _ = tmux::select_window_by_id(&app.session, &app.tui_window_id);
+                app.set_status(format!("Sent message to {}.", wt_name));
+                push_history(app, &prompt);
+                app.reset_input();
+                app.refresh_phases();
+            }
+            Err(e) => {
+                app.set_status(format!("Send failed: {}", e));
+                app.reset_input();
+            }
+        }
+    } else {
+        app.set_status(format!(
+            "Cannot switch to build mode from phase '{}' — use 'm' to send directly.",
+            phase
+        ));
+        app.reset_input();
     }
     Ok(())
 }

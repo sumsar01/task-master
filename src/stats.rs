@@ -2,6 +2,11 @@ use crate::registry::Registry;
 use anyhow::Result;
 use std::process::Command;
 
+/// Display column widths for the stats table.
+const STATS_COL_NAME_WIDTH: usize = 36;
+const STATS_COL_TOKENS_WIDTH: usize = 18;
+const STATS_COL_COST_WIDTH: usize = 10;
+
 /// Parsed token/cost data from `opencode stats` output.
 #[derive(Debug, Default, Clone)]
 pub struct StatsRow {
@@ -228,9 +233,9 @@ pub fn cmd_stats(registry: &Registry, days: Option<u32>) -> Result<()> {
     }
 
     // Column widths
-    let name_w = 36usize;
-    let tok_w = 18usize;
-    let cost_w = 10usize;
+    let name_w = STATS_COL_NAME_WIDTH;
+    let tok_w = STATS_COL_TOKENS_WIDTH;
+    let cost_w = STATS_COL_COST_WIDTH;
 
     // Header
     println!(

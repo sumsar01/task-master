@@ -18,38 +18,44 @@ pub fn build_qa_prompt(
     dev_window: &str, // base name, e.g. "WIS-olive"
     default_branch: &str,
 ) -> String {
-    // The QA agent runs inside the dev window itself (renamed to :qa) and uses
-    // tmux rename-window (by index) to update its phase suffix on handoff/escalation.
-    // We tell the agent to run `tmux list-windows` to find the window index,
-    // then rename it — this avoids colon-in-target ambiguity.
     let rename_cmd = tmux::build_rename_cmd(session, dev_window);
-
     let handoff_rename = format!("{} '{base}:review'", rename_cmd, base = dev_window);
     let escalation_rename = format!("{} '{base}:blocked'", rename_cmd, base = dev_window);
 
-    // Bodies use real newlines so the heredoc in the agent's shell command
-    // produces proper line breaks in the GitHub comment.
-    let handoff_body = "QA agent summary\n\nCompleted QA review. Here is what was done:\n\
-         - [list fixes applied]\n\
-         - [list comments resolved]\n\
-         - [anything left for humans]\n\n\
-         Ready for human review.";
-
-    let escalation_body = "QA agent escalation\n\nAfter 3 iterations I was unable to fully \
-         resolve all issues. Human input needed:\n\n\
-         **Remaining CI failures:**\n\
-         - [list each failing check and why you could not fix it]\n\n\
-         **Remaining review comments needing human decision:**\n\
-         - [list each comment]\n\n\
-         **What I did fix:**\n\
-         - [list]";
+    let owner = repo.split('/').next().unwrap_or("");
+    let name = repo.split('/').nth(1).unwrap_or("");
 
     format!(
         "You are a QA agent for PR #{pr} on branch '{branch}' in repo '{repo}'.\n\
          \n\
          Your job is to iterate (up to 3 times) until the PR is clean, then hand off to humans.\n\
          \n\
-         LOOP PROCEDURE (repeat up to 3 times)\n\
+         {sync_step}\
+         {review_steps}\
+         {handoff}\
+         {escalation}\
+         IMPORTANT RULES\n\
+         - Only push to branch '{branch}' - never create a new branch.\n\
+         - Always use --force-with-lease when pushing (branch may have been rebased).\n\
+         - Keep commit messages prefixed with 'qa:'.\n\
+         - Do not approve the PR yourself.\n\
+         - Do not merge the PR.\n\
+         - Only resolve review threads where you have applied a code fix — never resolve questions or human-judgement items.\n\
+         - If you are unsure whether a fix is correct, leave it for the human and note it in your comment.\n\
+         - gh CLI is available. Use it for all GitHub interactions.",
+        pr = pr_number,
+        branch = branch,
+        repo = repo,
+        sync_step = qa_sync_step(default_branch),
+        review_steps = qa_review_steps(pr_number, owner, name),
+        handoff = qa_handoff_section(pr_number, &handoff_rename, &handoff_comment_body()),
+        escalation = qa_escalation_section(pr_number, &escalation_rename, &escalation_comment_body()),
+    )
+}
+
+fn qa_sync_step(default_branch: &str) -> String {
+    format!(
+        "LOOP PROCEDURE (repeat up to 3 times)\n\
          \n\
          Step 0 - Sync with base branch\n\
          Run: git fetch origin\n\
@@ -81,8 +87,14 @@ pub fn build_qa_prompt(
          \n\
          After resolving all conflicts: git rebase --continue\n\
          Then push: git push --force-with-lease\n\
-         \n\
-         Step 1 - Self-review the diff\n\
+         \n",
+        default_branch = default_branch,
+    )
+}
+
+fn qa_review_steps(pr_number: u64, owner: &str, name: &str) -> String {
+    format!(
+        "Step 1 - Self-review the diff\n\
          Run: gh pr diff {pr}\n\
           Look for: obvious bugs, missing error handling, unhandled edge cases, style issues, missing tests,\n\
           DRY violations (duplicated logic that could be extracted), magic numbers (literals that should be\n\
@@ -149,22 +161,59 @@ pub fn build_qa_prompt(
          Step 5 - Evaluate\n\
          - All CI checks green AND no actionable unresolved threads -> proceed to Handoff.\n\
          - Otherwise -> go back to Step 0 (next iteration).\n\
-         \n\
-         HANDOFF (all checks green, no actionable comments)\n\
+         \n",
+        pr = pr_number,
+        owner = owner,
+        name = name,
+    )
+}
+
+fn handoff_comment_body() -> String {
+    "QA agent summary\n\nCompleted QA review. Here is what was done:\n\
+         - [list fixes applied]\n\
+         - [list comments resolved]\n\
+         - [anything left for humans]\n\n\
+         Ready for human review."
+        .to_string()
+}
+
+fn escalation_comment_body() -> String {
+    "QA agent escalation\n\nAfter 3 iterations I was unable to fully \
+         resolve all issues. Human input needed:\n\n\
+         **Remaining CI failures:**\n\
+         - [list each failing check and why you could not fix it]\n\n\
+         **Remaining review comments needing human decision:**\n\
+         - [list each comment]\n\n\
+         **What I did fix:**\n\
+         - [list]"
+        .to_string()
+}
+
+fn qa_handoff_section(pr_number: u64, handoff_rename: &str, body: &str) -> String {
+    format!(
+        "HANDOFF (all checks green, no actionable comments)\n\
          \n\
          1. Rename the dev window to signal ready-for-review:\n\
               {handoff_rename}\n\
          2. Post a PR comment summarising what you did (write body to file to preserve newlines):\n\
               cat > /tmp/qa-comment-{pr}.txt <<'BODY'\n\
-         {handoff_body}\n\
+         {body}\n\
          BODY\n\
               gh pr comment {pr} --body-file /tmp/qa-comment-{pr}.txt\n\
          3. Remove the wip label:\n\
               gh pr edit {pr} --remove-label wip\n\
          \n\
          Then stop.\n\
-         \n\
-         ESCALATION (after 3 full iterations, still not clean)\n\
+         \n",
+        pr = pr_number,
+        handoff_rename = handoff_rename,
+        body = body,
+    )
+}
+
+fn qa_escalation_section(pr_number: u64, escalation_rename: &str, body: &str) -> String {
+    format!(
+        "ESCALATION (after 3 full iterations, still not clean)\n\
          \n\
          You MUST complete all 3 iterations before escalating. Do not escalate early\n\
          because CI logs are inaccessible, checks are stale, or a single iteration\n\
@@ -174,31 +223,15 @@ pub fn build_qa_prompt(
               {escalation_rename}\n\
          2. Post a PR comment with a clear escalation summary (write body to file to preserve newlines):\n\
               cat > /tmp/qa-escalation-{pr}.txt <<'BODY'\n\
-         {escalation_body}\n\
+         {body}\n\
          BODY\n\
               gh pr comment {pr} --body-file /tmp/qa-escalation-{pr}.txt\n\
          \n\
          Then stop. Do NOT remove the wip label on escalation.\n\
-         \n\
-         IMPORTANT RULES\n\
-         - Only push to branch '{branch}' - never create a new branch.\n\
-         - Always use --force-with-lease when pushing (branch may have been rebased).\n\
-         - Keep commit messages prefixed with 'qa:'.\n\
-         - Do not approve the PR yourself.\n\
-         - Do not merge the PR.\n\
-         - Only resolve review threads where you have applied a code fix — never resolve questions or human-judgement items.\n\
-         - If you are unsure whether a fix is correct, leave it for the human and note it in your comment.\n\
-         - gh CLI is available. Use it for all GitHub interactions.",
+         \n",
         pr = pr_number,
-        branch = branch,
-        repo = repo,
-        owner = repo.split('/').next().unwrap_or(""),
-        name = repo.split('/').nth(1).unwrap_or(""),
-        default_branch = default_branch,
-        handoff_rename = handoff_rename,
         escalation_rename = escalation_rename,
-        handoff_body = handoff_body,
-        escalation_body = escalation_body,
+        body = body,
     )
 }
 

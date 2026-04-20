@@ -10,6 +10,21 @@ use tracing::info;
 /// `pkill -f` to identify and kill existing supervisor processes.
 const SUPERVISOR_SENTINEL: &str = "task-master-supervisor-loop";
 
+/// Milliseconds to wait after pkill before starting the new supervisor, giving
+/// the old process time to exit cleanly.
+const PKILL_SLEEP_MS: u64 = 500;
+
+/// Minimum seconds between supervisor passes. If the last pass completed less
+/// than this many seconds ago, the current pass is skipped to avoid back-to-back
+/// runs after the OS resumes a suspended sleep.
+const SLEEP_WAKE_GUARD_SECS: u64 = 60;
+
+/// Seconds the supervisor sleeps between polling passes (5 minutes).
+const SUPERVISOR_POLL_INTERVAL_SECS: u64 = 300;
+
+/// Seconds between inner-loop checks for the early-wake stamp file.
+const SUPERVISOR_INNER_POLL_SECS: u64 = 2;
+
 /// Spawn a supervisor agent for the current session.
 ///
 /// Kills any existing supervisor loop processes first (prevents double-supervisor
@@ -44,7 +59,7 @@ pub fn cmd_supervise(registry: &Registry) -> Result<()> {
     let _ = Command::new("pkill")
         .args(["-f", SUPERVISOR_SENTINEL])
         .status();
-    thread::sleep(Duration::from_millis(500));
+    thread::sleep(Duration::from_millis(PKILL_SLEEP_MS));
 
     info!(
         "[supervisor] Starting in session '{}', dir {}",
@@ -74,10 +89,10 @@ pub fn cmd_supervise(registry: &Registry) -> Result<()> {
             "export TASK_MASTER={bin};",
             " while true; do",
             " : {sentinel};",
-            // Sleep/wake guard: skip if we ran less than 60s ago
+            // Sleep/wake guard: skip if we ran less than SLEEP_WAKE_GUARD_SECS ago
             " _now=$(date +%s);",
             " _last=$(cat /tmp/task-master-supervisor-last 2>/dev/null || echo 0);",
-            " if [ $(( _now - _last )) -ge 60 ]; then",
+            " if [ $(( _now - _last )) -ge {wake_guard} ]; then",
             // Idle skip: only run the agent if there are active phase windows
             // OR there are registered ephemeral worktrees (which may need cleanup).
             " if tmux list-windows -F '#{{window_name}}' 2>/dev/null | grep -qE ':(dev|qa|plan|e2e)$'",
@@ -86,20 +101,23 @@ pub fn cmd_supervise(registry: &Registry) -> Result<()> {
             " date +%s > /tmp/task-master-supervisor-last;",
             " fi;",
             " fi;",
-            // Wake-aware sleep: poll for an early-wake stamp every 2s
-            " sleep 300 & _sleep_pid=$!;",
+            // Wake-aware sleep: poll for an early-wake stamp every SUPERVISOR_INNER_POLL_SECS
+            " sleep {poll_interval} & _sleep_pid=$!;",
             " while kill -0 $_sleep_pid 2>/dev/null; do",
             " if [ -f /tmp/task-master-supervisor-wake ]; then",
             " rm -f /tmp/task-master-supervisor-wake;",
             " kill $_sleep_pid 2>/dev/null;",
             " break;",
             " fi;",
-            " sleep 2;",
+            " sleep {inner_poll};",
             " done;",
             " done",
         ),
         bin = tmux::shell_escape(bin_str),
         sentinel = SUPERVISOR_SENTINEL,
+        wake_guard = SLEEP_WAKE_GUARD_SECS,
+        poll_interval = SUPERVISOR_POLL_INTERVAL_SECS,
+        inner_poll = SUPERVISOR_INNER_POLL_SECS,
     );
 
     tmux::spawn_named_window_raw(&session, "supervisor", &working_dir, &loop_cmd)

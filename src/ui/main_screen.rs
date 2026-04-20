@@ -70,6 +70,10 @@ fn render_header(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
                 .fg(t.text_accent)
                 .add_modifier(Modifier::BOLD),
         ),
+        Span::styled(
+            format!(" v{}", env!("CARGO_PKG_VERSION")),
+            t.text_dim_style(),
+        ),
     ]));
     f.render_widget(title, row1_cols[0]);
 

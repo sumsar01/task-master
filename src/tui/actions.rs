@@ -251,29 +251,23 @@ pub fn execute_send_build(app: &mut App) -> Result<()> {
             }
         }
     } else if phase == "ready" {
-        // Planning is done but opencode has exited — spawn a fresh dev agent with
-        // the prompt, exactly like 's' (Spawn) but without resetting the branch.
-        let registry = app.registry.clone();
-        let wt_name_clone = wt_name.clone();
-        let prompt_clone = prompt.clone();
-        let label = format!("Spawning {}…", wt_name);
-
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let result = crate::spawn::cmd_spawn(&registry, &wt_name_clone, &prompt_clone, false);
-            let msg = result
-                .map(|_| format!("Spawned {}:dev", wt_name_clone))
-                .map_err(|e| format!("Spawn failed: {}", e));
-            let _ = tx.send(msg);
-        });
-
-        push_history(app, &prompt);
-        app.clone_rx = Some(rx);
-        app.cloning_label = label;
-        app.cloning_op = CloningOp::Spawn;
-        app.pending_history_entry = None;
-        app.reset_input();
-        app.mode = Mode::Cloning;
+        // Planning is done but opencode has exited — send the message directly to
+        // the tmux window and rename the phase to :dev. Do NOT spawn a new agent;
+        // use 's' (Spawn) if a fresh agent is needed.
+        match crate::cmd_send(&app.registry, &wt_name, &prompt) {
+            Ok(()) => {
+                let _ = crate::tmux::set_window_phase(&session, &wt_name, Some("dev"));
+                let _ = tmux::select_window_by_id(&app.session, &app.tui_window_id);
+                app.set_status(format!("Sent message to {}.", wt_name));
+                push_history(app, &prompt);
+                app.reset_input();
+                app.refresh_phases();
+            }
+            Err(e) => {
+                app.set_status(format!("Send failed: {}", e));
+                app.reset_input();
+            }
+        }
     } else if phase == "dev" {
         // Already in build mode — just send normally.
         match crate::cmd_send(&app.registry, &wt_name, &prompt) {

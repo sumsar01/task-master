@@ -1,4 +1,4 @@
-use crate::registry::{write_collapsed, write_group_collapsed, ProjectConfig, Registry, Worktree};
+use crate::registry::{write_collapsed, write_context_collapsed, write_group_collapsed, ProjectConfig, Registry, Worktree};
 use crate::stats::{fetch_stats, StatsRow};
 use crate::status::find_live_phase;
 use crate::tmux;
@@ -19,6 +19,13 @@ pub enum ListEntry {
     /// When collapsed, all projects and their worktrees in this group are hidden.
     GroupHeader {
         /// Group name, e.g. "Work" or "Personal".
+        name: String,
+        collapsed: bool,
+    },
+    /// A context sub-group header row (selectable; Enter/Space toggles collapse).
+    /// Rendered between GroupHeader and ProjectHeader when projects have a context tag.
+    ContextHeader {
+        /// Context name, e.g. "fulfillment" or "delivery-and-logistics".
         name: String,
         collapsed: bool,
     },
@@ -113,6 +120,9 @@ pub struct App {
     /// Persisted super-group collapse state, keyed by group name.
     /// A missing entry means the group is expanded (default).
     pub group_collapsed: HashMap<String, bool>,
+    /// Persisted context collapse state, keyed by context name.
+    /// A missing entry means the context is expanded (default).
+    pub context_collapsed: HashMap<String, bool>,
     /// Visual list: group headers, project headers, worktree rows, and
     /// empty-project placeholders interleaved in order.  Rebuilt by `rebuild_entries`.
     pub entries: Vec<ListEntry>,
@@ -273,9 +283,11 @@ impl App {
 
         // Load persisted group collapse state from registry.
         let group_collapsed = registry.group_states.clone();
+        // Load persisted context collapse state from registry.
+        let context_collapsed = registry.context_states.clone();
 
         // Build entries from projects + worktrees, respecting collapse state.
-        let entries = Self::build_entries(&projects, &worktrees, &group_collapsed);
+        let entries = Self::build_entries(&projects, &worktrees, &group_collapsed, &context_collapsed);
 
         // Select the first worktree entry (skip headers).
         let initial_selection = entries
@@ -290,6 +302,7 @@ impl App {
             worktrees,
             projects,
             group_collapsed,
+            context_collapsed,
             entries,
             phases: vec!["?".to_string(); count],
             list_state,
@@ -344,18 +357,24 @@ impl App {
     /// flat worktrees list.  Called once on construction and again whenever
     /// collapse state changes.
     ///
-    /// The list is structured as a two-level hierarchy:
+    /// The list is structured as a three-level hierarchy:
     ///   GroupHeader (if any groups are defined)
-    ///     ProjectHeader
-    ///       Worktree rows / EmptyProject
+    ///     ContextHeader (if any contexts are defined within the group)
+    ///       ProjectHeader
+    ///         Worktree rows / EmptyProject
     ///
     /// Projects with `group = None` are rendered under an implicit "Ungrouped"
     /// GroupHeader at the bottom — but only if there is at least one named group,
     /// so configs without any group assignments remain unchanged (backwards compat).
+    ///
+    /// Within a group, projects with `context = None` are rendered under an
+    /// implicit "Other" ContextHeader — but only if at least one project in the
+    /// group has a context, so groups without any context assignments render flat.
     fn build_entries(
         projects: &[ProjectConfig],
         worktrees: &[Worktree],
         group_collapsed: &HashMap<String, bool>,
+        context_collapsed: &HashMap<String, bool>,
     ) -> Vec<ListEntry> {
         let mut entries = Vec::new();
         let mut wt_offset = 0usize;
@@ -433,26 +452,91 @@ impl App {
             });
 
             if !group_is_collapsed {
-                // Emit projects belonging to this group, in their original order.
-                for (proj_idx, proj) in projects.iter().enumerate() {
-                    if proj.group.as_deref() != group_key.as_deref() {
-                        continue;
+                // Collect projects in this group.
+                let group_projects: Vec<(usize, &ProjectConfig)> = projects
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| p.group.as_deref() == group_key.as_deref())
+                    .collect();
+
+                // Determine if any project in this group has a context set.
+                let has_named_contexts = group_projects.iter().any(|(_, p)| p.context.is_some());
+
+                if !has_named_contexts {
+                    // Flat rendering within the group (no context headers).
+                    for (proj_idx, proj) in &group_projects {
+                        entries.push(ListEntry::ProjectHeader {
+                            name: proj.name.clone(),
+                            collapsed: proj.collapsed,
+                            project_idx: *proj_idx,
+                        });
+                        let wt_start = proj_wt_start[*proj_idx];
+                        if !proj.collapsed {
+                            if proj.worktrees.is_empty() {
+                                entries.push(ListEntry::EmptyProject);
+                            } else {
+                                for i in 0..proj.worktrees.len() {
+                                    entries.push(ListEntry::Worktree {
+                                        wt: worktrees[wt_start + i].clone(),
+                                        worktree_idx: wt_start + i,
+                                    });
+                                }
+                            }
+                        }
                     }
-                    entries.push(ListEntry::ProjectHeader {
-                        name: proj.name.clone(),
-                        collapsed: proj.collapsed,
-                        project_idx: proj_idx,
-                    });
-                    let wt_start = proj_wt_start[proj_idx];
-                    if !proj.collapsed {
-                        if proj.worktrees.is_empty() {
-                            entries.push(ListEntry::EmptyProject);
-                        } else {
-                            for i in 0..proj.worktrees.len() {
-                                entries.push(ListEntry::Worktree {
-                                    wt: worktrees[wt_start + i].clone(),
-                                    worktree_idx: wt_start + i,
+                } else {
+                    // Context-grouped rendering: collect distinct contexts in first-seen order.
+                    let mut context_order: Vec<Option<String>> = Vec::new();
+                    for (_, proj) in &group_projects {
+                        let key = proj.context.clone();
+                        if !context_order.contains(&key) {
+                            context_order.push(key);
+                        }
+                    }
+                    // Named contexts first, then "Other" for untagged projects.
+                    let mut named_contexts: Vec<Option<String>> = context_order
+                        .iter()
+                        .filter(|c| c.is_some())
+                        .cloned()
+                        .collect();
+                    let has_ungrouped_context = context_order.iter().any(|c| c.is_none());
+                    if has_ungrouped_context {
+                        named_contexts.push(None);
+                    }
+
+                    for ctx_key in &named_contexts {
+                        let ctx_display = ctx_key.as_deref().unwrap_or("Other").to_string();
+                        let ctx_is_collapsed =
+                            *context_collapsed.get(&ctx_display).unwrap_or(&false);
+
+                        entries.push(ListEntry::ContextHeader {
+                            name: ctx_display.clone(),
+                            collapsed: ctx_is_collapsed,
+                        });
+
+                        if !ctx_is_collapsed {
+                            for (proj_idx, proj) in &group_projects {
+                                if proj.context.as_deref() != ctx_key.as_deref() {
+                                    continue;
+                                }
+                                entries.push(ListEntry::ProjectHeader {
+                                    name: proj.name.clone(),
+                                    collapsed: proj.collapsed,
+                                    project_idx: *proj_idx,
                                 });
+                                let wt_start = proj_wt_start[*proj_idx];
+                                if !proj.collapsed {
+                                    if proj.worktrees.is_empty() {
+                                        entries.push(ListEntry::EmptyProject);
+                                    } else {
+                                        for i in 0..proj.worktrees.len() {
+                                            entries.push(ListEntry::Worktree {
+                                                wt: worktrees[wt_start + i].clone(),
+                                                worktree_idx: wt_start + i,
+                                            });
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -466,7 +550,7 @@ impl App {
     /// Rebuild `self.entries` from the current `projects` snapshot.
     pub fn rebuild_entries(&mut self) {
         let current_wt_idx = self.selected_worktree_idx();
-        self.entries = Self::build_entries(&self.projects, &self.worktrees, &self.group_collapsed);
+        self.entries = Self::build_entries(&self.projects, &self.worktrees, &self.group_collapsed, &self.context_collapsed);
 
         // Try to keep selection on the same worktree after rebuild.
         let new_sel = if let Some(wt_idx) = current_wt_idx {
@@ -533,6 +617,35 @@ impl App {
 
         // Persist (best-effort; don't crash TUI on write failure).
         let _ = write_group_collapsed(&self.registry.base_dir, &group_name, new_collapsed);
+    }
+
+    /// Toggle the collapsed state of the context sub-group at `entry_idx` and persist
+    /// the change to task-master.toml via `write_context_collapsed`.
+    pub fn toggle_context_collapse(&mut self, entry_idx: usize) {
+        let (context_name, new_collapsed) =
+            if let Some(ListEntry::ContextHeader {
+                name, collapsed, ..
+            }) = self.entries.get(entry_idx)
+            {
+                (name.clone(), !*collapsed)
+            } else {
+                return;
+            };
+
+        self.context_collapsed
+            .insert(context_name.clone(), new_collapsed);
+        self.rebuild_entries();
+
+        // Keep cursor on the ContextHeader after rebuild.
+        if self.list_state.selected().is_none() {
+            let header_pos = self.entries.iter().position(
+                |e| matches!(e, ListEntry::ContextHeader { name, .. } if name == &context_name),
+            );
+            self.list_state.select(header_pos.or(Some(0)));
+        }
+
+        // Persist (best-effort; don't crash TUI on write failure).
+        let _ = write_context_collapsed(&self.registry.base_dir, &context_name, new_collapsed);
     }
 
     pub fn selected(&self) -> Option<usize> {
@@ -836,6 +949,10 @@ impl App {
         self.last_detail_idx = None;
         self.preview_lines.clear();
         self.detail_lines.clear();
+
+        // Sync collapse state from the new registry (another process may have written it).
+        self.group_collapsed = new_registry.group_states.clone();
+        self.context_collapsed = new_registry.context_states.clone();
 
         // Replace the owned registry so all subsequent actions use the new state.
         self.registry = new_registry;

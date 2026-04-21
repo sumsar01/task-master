@@ -97,6 +97,10 @@ struct RawConfig {
     /// Keys are group names (e.g. "Work"), values are whether the group is collapsed.
     #[serde(default)]
     group_states: HashMap<String, bool>,
+    /// Persisted context collapse state written by the TUI.
+    /// Keys are context names (e.g. "fulfillment"), values are whether the context is collapsed.
+    #[serde(default)]
+    context_states: HashMap<String, bool>,
 }
 
 /// A fully-resolved worktree ready for use.
@@ -125,6 +129,9 @@ pub struct Registry {
     /// Persisted collapse state for super-groups, keyed by group name.
     /// A missing entry means the group is expanded (default).
     pub group_states: HashMap<String, bool>,
+    /// Persisted collapse state for contexts, keyed by context name.
+    /// A missing entry means the context is expanded (default).
+    pub context_states: HashMap<String, bool>,
 }
 
 impl Registry {
@@ -174,6 +181,7 @@ impl Registry {
             base_dir,
             ui: raw.ui,
             group_states: raw.group_states,
+            context_states: raw.context_states,
         })
     }
 
@@ -287,6 +295,25 @@ pub fn write_group_collapsed(base_dir: &PathBuf, group_name: &str, collapsed: bo
             doc["group_states"] = toml_edit::table();
         }
         doc["group_states"][group_name] = toml_edit::value(collapsed);
+        Ok(())
+    })
+}
+
+/// Update the `[context_states]` table in the TOML config to record whether a
+/// context sub-group is collapsed.  The table is created if it does not exist yet.
+///
+/// Example resulting TOML:
+/// ```toml
+/// [context_states]
+/// fulfillment = true
+/// platform = false
+/// ```
+pub fn write_context_collapsed(base_dir: &PathBuf, context_name: &str, collapsed: bool) -> Result<()> {
+    with_config_doc(base_dir, |doc| {
+        if doc.get("context_states").is_none() {
+            doc["context_states"] = toml_edit::table();
+        }
+        doc["context_states"][context_name] = toml_edit::value(collapsed);
         Ok(())
     })
 }

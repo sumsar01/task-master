@@ -227,13 +227,21 @@ fn render_worktree_list(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) {
                     )]);
                     ListItem::new(line)
                 }
+                ListEntry::ContextHeader { name, collapsed } => {
+                    let icon = if *collapsed { "◇" } else { "◆" };
+                    let line = Line::from(vec![Span::styled(
+                        format!("  {} {} ", icon, name),
+                        base.fg(t.section_header).add_modifier(Modifier::BOLD),
+                    )]);
+                    ListItem::new(line)
+                }
                 ListEntry::ProjectHeader {
                     name, collapsed, ..
                 } => {
                     let icon = if *collapsed { "▶" } else { "▼" };
                     let line = Line::from(vec![Span::styled(
-                        format!("  {} {} ", icon, name),
-                        base.fg(t.section_header).add_modifier(Modifier::BOLD),
+                        format!("    {} {} ", icon, name),
+                        base.fg(t.section_header),
                     )]);
                     ListItem::new(line)
                 }
@@ -245,7 +253,7 @@ fn render_worktree_list(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) {
                         .unwrap_or("?");
                     let phase_color = t.phase_color(phase);
                     let line = Line::from(vec![
-                        Span::styled(format!("      {:<18}", wt.window_name), base.fg(t.text)),
+                        Span::styled(format!("        {:<18}", wt.window_name), base.fg(t.text)),
                         Span::styled(format!("[{}]", phase), base.fg(phase_color)),
                     ]);
                     ListItem::new(line)
@@ -617,6 +625,11 @@ fn render_context_hints(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
         }
         Some(idx) => match app.entries.get(idx) {
             Some(ListEntry::GroupHeader { .. }) => &[
+                ("Enter", "collapse/expand"),
+                ("P", "add project"),
+                ("?", "help"),
+            ],
+            Some(ListEntry::ContextHeader { .. }) => &[
                 ("Enter", "collapse/expand"),
                 ("P", "add project"),
                 ("?", "help"),

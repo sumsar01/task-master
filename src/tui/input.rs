@@ -161,6 +161,9 @@ fn handle_normal(app: &mut App, code: KeyCode) -> Result<()> {
                     Some(ListEntry::GroupHeader { .. }) => {
                         app.toggle_group_collapse(i);
                     }
+                    Some(ListEntry::ContextHeader { .. }) => {
+                        app.toggle_context_collapse(i);
+                    }
                     Some(ListEntry::ProjectHeader { .. }) => {
                         app.toggle_collapse(i);
                     }

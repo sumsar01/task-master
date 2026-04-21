@@ -205,6 +205,10 @@ pub fn send_tab_then_message(session: &str, base_name: &str, prompt: &str) -> Re
     })?;
     let target = format!("{}:{}", session, idx);
     tmux(&["send-keys", "-t", &target, "Tab"])?;
+    // Give opencode time to process the Tab and complete the mode switch before
+    // the prompt text arrives. Without this delay the message lands in the wrong
+    // agent (plan) because the switch hasn't finished yet.
+    std::thread::sleep(std::time::Duration::from_millis(400));
     tmux(&["send-keys", "-t", &target, prompt])?;
     tmux(&["send-keys", "-t", &target, "Enter"])?;
     Ok(())

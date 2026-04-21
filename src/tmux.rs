@@ -6,6 +6,13 @@ use tracing::debug;
 /// Gives tmux time to process the kill and update its internal window list.
 const KILL_WINDOW_SETTLE_MS: u64 = 300;
 
+/// How long to wait (ms) after sending a Tab keypress to opencode before sending
+/// the prompt text. Tab switches between the two primary agents (plan ↔ build);
+/// opencode must finish processing the mode switch before the prompt arrives or
+/// the message lands in the wrong agent. 800ms covers observed worst-case
+/// latency on slow machines; increase if the race still triggers.
+const TAB_SETTLE_MS: u64 = 800;
+
 /// Minimum run of consecutive spaces that marks the start of the tmux sidebar
 /// column separator. The first 20 visible characters are skipped before scanning.
 const SIDEBAR_MIN_RUN_LEN: usize = 8;
@@ -208,7 +215,7 @@ pub fn send_tab_then_message(session: &str, base_name: &str, prompt: &str) -> Re
     // Give opencode time to process the Tab and complete the mode switch before
     // the prompt text arrives. Without this delay the message lands in the wrong
     // agent (plan) because the switch hasn't finished yet.
-    std::thread::sleep(std::time::Duration::from_millis(400));
+    std::thread::sleep(std::time::Duration::from_millis(TAB_SETTLE_MS));
     tmux(&["send-keys", "-t", &target, prompt])?;
     tmux(&["send-keys", "-t", &target, "Enter"])?;
     Ok(())

@@ -11,6 +11,39 @@ const TMUX_REFOCUS_DELAY_MS: u64 = 250;
 // Action execution
 // ---------------------------------------------------------------------------
 
+/// Which low-level operation `execute_send_build` should perform for a given
+/// window phase. Pure (no I/O) so it can be unit-tested without a live tmux
+/// session.
+#[derive(Debug, PartialEq)]
+pub enum SendBuildAction {
+    /// Phase is "plan": send Tab to switch opencode to build agent, then send
+    /// the prompt.
+    SwitchThenSend,
+    /// Phase is "dev": opencode is already in build mode — send the prompt
+    /// directly.
+    SendDirect,
+    /// Phase is "ready": the planning agent exited but the window still exists.
+    /// Send the prompt to the window and rename the phase to "dev".
+    SendToReady,
+    /// Any other phase (qa, review, blocked, idle, …): the action is rejected
+    /// with an error message for the user.
+    Rejected(String),
+}
+
+/// Determine what `execute_send_build` should do based on the current window
+/// phase. Pure function — no side effects, no tmux calls.
+pub fn send_build_action_for_phase(phase: &str) -> SendBuildAction {
+    match phase {
+        "plan" => SendBuildAction::SwitchThenSend,
+        "dev" => SendBuildAction::SendDirect,
+        "ready" => SendBuildAction::SendToReady,
+        other => SendBuildAction::Rejected(format!(
+            "Cannot send in phase '{}' — use 's' to spawn a fresh agent.",
+            other
+        )),
+    }
+}
+
 pub fn execute_action(app: &mut App, kind: &ActionKind, force: bool) -> Result<()> {
     match kind {
         ActionKind::Spawn => execute_spawn(app, force),
@@ -79,6 +112,71 @@ pub fn execute_spawn(app: &mut App, force: bool) -> Result<()> {
     app.mode = Mode::Cloning;
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_send_build_action_plan_phase() {
+        assert_eq!(
+            send_build_action_for_phase("plan"),
+            SendBuildAction::SwitchThenSend
+        );
+    }
+
+    #[test]
+    fn test_send_build_action_dev_phase() {
+        assert_eq!(
+            send_build_action_for_phase("dev"),
+            SendBuildAction::SendDirect
+        );
+    }
+
+    #[test]
+    fn test_send_build_action_ready_phase() {
+        assert_eq!(
+            send_build_action_for_phase("ready"),
+            SendBuildAction::SendToReady
+        );
+    }
+
+    #[test]
+    fn test_send_build_action_rejected_phases() {
+        for phase in &["qa", "review", "blocked", "idle", "", "?", "dev-stalled"] {
+            match send_build_action_for_phase(phase) {
+                SendBuildAction::Rejected(msg) => {
+                    assert!(
+                        msg.contains(phase),
+                        "Rejected message should contain the phase name '{}', got: {}",
+                        phase,
+                        msg
+                    );
+                }
+                other => panic!(
+                    "Expected Rejected for phase '{}', got {:?}",
+                    phase, other
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn test_send_build_action_rejected_contains_hint() {
+        // The rejected message should tell the user to use 's' to spawn.
+        match send_build_action_for_phase("qa") {
+            SendBuildAction::Rejected(msg) => {
+                assert!(msg.contains("'s'"), "Hint to use 's' missing: {}", msg);
+            }
+            other => panic!("Expected Rejected, got {:?}", other),
+        }
+    }
+}
+
 
 /// Extract only the prompt text from the input buffer (without consuming it).
 /// Returns `Some(prompt)` if non-empty, `None` otherwise.
@@ -233,62 +331,68 @@ pub fn execute_send_build(app: &mut App) -> Result<()> {
             return Ok(());
         }
     };
-    if phase == "plan" {
-        // Tab switches opencode from plan → build agent, then send the message.
-        match crate::tmux::send_tab_then_message(&session, &wt_name, &prompt) {
-            Ok(()) => {
-                // Rename the window from :plan to :dev to reflect the new mode.
-                let _ = crate::tmux::set_window_phase(&session, &wt_name, Some("dev"));
-                let _ = tmux::select_window_by_id(&app.session, &app.tui_window_id);
-                app.set_status(format!("Switched to build mode and sent message to {}.", wt_name));
-                push_history(app, &prompt);
-                app.reset_input();
-                app.refresh_phases();
-            }
-            Err(e) => {
-                app.set_status(format!("Send (build) failed: {}", e));
-                app.reset_input();
-            }
-        }
-    } else if phase == "ready" {
-        // Planning is done but opencode has exited — send the message directly to
-        // the tmux window and rename the phase to :dev. Do NOT spawn a new agent;
-        // use 's' (Spawn) if a fresh agent is needed.
-        match crate::cmd_send(&app.registry, &wt_name, &prompt) {
-            Ok(()) => {
-                let _ = crate::tmux::set_window_phase(&session, &wt_name, Some("dev"));
-                let _ = tmux::select_window_by_id(&app.session, &app.tui_window_id);
-                app.set_status(format!("Sent message to {}.", wt_name));
-                push_history(app, &prompt);
-                app.reset_input();
-                app.refresh_phases();
-            }
-            Err(e) => {
-                app.set_status(format!("Send failed: {}", e));
-                app.reset_input();
+    match send_build_action_for_phase(&phase) {
+        SendBuildAction::SwitchThenSend => {
+            // Tab switches opencode from plan → build agent, then send the message.
+            match crate::tmux::send_tab_then_message(&session, &wt_name, &prompt) {
+                Ok(()) => {
+                    // Rename the window from :plan to :dev to reflect the new mode.
+                    let _ = crate::tmux::set_window_phase(&session, &wt_name, Some("dev"));
+                    let _ = tmux::select_window_by_id(&app.session, &app.tui_window_id);
+                    app.set_status(format!(
+                        "Switched to build mode and sent message to {}.",
+                        wt_name
+                    ));
+                    push_history(app, &prompt);
+                    app.reset_input();
+                    app.refresh_phases();
+                }
+                Err(e) => {
+                    app.set_status(format!("Send (build) failed: {}", e));
+                    app.reset_input();
+                }
             }
         }
-    } else if phase == "dev" {
-        // Already in build mode — just send normally.
-        match crate::cmd_send(&app.registry, &wt_name, &prompt) {
-            Ok(()) => {
-                let _ = tmux::select_window_by_id(&app.session, &app.tui_window_id);
-                app.set_status(format!("Sent message to {}.", wt_name));
-                push_history(app, &prompt);
-                app.reset_input();
-                app.refresh_phases();
-            }
-            Err(e) => {
-                app.set_status(format!("Send failed: {}", e));
-                app.reset_input();
+        SendBuildAction::SendToReady => {
+            // Planning is done; opencode has exited but the tmux window still
+            // exists. Send the message directly and rename the window to :dev.
+            // We do NOT spawn a fresh agent — 'b' means "send message", not
+            // "spawn". Use 's' to spawn a fresh agent.
+            match crate::cmd_send(&app.registry, &wt_name, &prompt) {
+                Ok(()) => {
+                    let _ = crate::tmux::set_window_phase(&session, &wt_name, Some("dev"));
+                    let _ = tmux::select_window_by_id(&app.session, &app.tui_window_id);
+                    app.set_status(format!("Sent message to {}.", wt_name));
+                    push_history(app, &prompt);
+                    app.reset_input();
+                    app.refresh_phases();
+                }
+                Err(e) => {
+                    app.set_status(format!("Send failed: {}", e));
+                    app.reset_input();
+                }
             }
         }
-    } else {
-        app.set_status(format!(
-            "Cannot send in phase '{}' — use 's' to spawn a fresh agent.",
-            phase
-        ));
-        app.reset_input();
+        SendBuildAction::SendDirect => {
+            // Already in build mode — send normally.
+            match crate::cmd_send(&app.registry, &wt_name, &prompt) {
+                Ok(()) => {
+                    let _ = tmux::select_window_by_id(&app.session, &app.tui_window_id);
+                    app.set_status(format!("Sent message to {}.", wt_name));
+                    push_history(app, &prompt);
+                    app.reset_input();
+                    app.refresh_phases();
+                }
+                Err(e) => {
+                    app.set_status(format!("Send failed: {}", e));
+                    app.reset_input();
+                }
+            }
+        }
+        SendBuildAction::Rejected(msg) => {
+            app.set_status(msg);
+            app.reset_input();
+        }
     }
     Ok(())
 }

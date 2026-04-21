@@ -957,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "task-master"
-version = "0.2.23"
+version = "0.2.25"
 dependencies = [
  "ansi-to-tui",
  "anyhow",

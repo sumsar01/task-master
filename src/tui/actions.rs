@@ -766,6 +766,67 @@ pub fn collect_spawn_inputs(app: &mut App) -> Option<(String, String)> {
     Some((wt_name, prompt))
 }
 
+/// Open the PR for the selected worktree's current branch in the default browser.
+///
+/// Uses `gh pr view <branch> --json url --jq '.url'` to get the PR URL, then
+/// opens it with `open` (macOS) or `xdg-open` (Linux).
+pub fn execute_open_pr(app: &mut App) -> Result<()> {
+    let wt = match app.selected_worktree() {
+        Some(w) => w.clone(),
+        None => return Ok(()),
+    };
+
+    // Get current branch name.
+    let branch_out = std::process::Command::new("git")
+        .args(["-C", wt.abs_path.to_str().unwrap_or("."), "rev-parse", "--abbrev-ref", "HEAD"])
+        .output();
+    let branch = match branch_out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => {
+            app.set_status("Could not determine current branch.");
+            return Ok(());
+        }
+    };
+
+    // Look up PR URL via gh.
+    let pr_out = std::process::Command::new("gh")
+        .args(["pr", "view", &branch, "--json", "url", "--jq", ".url"])
+        .current_dir(&wt.abs_path)
+        .output();
+    let url = match pr_out {
+        Ok(o) if o.status.success() => {
+            let u = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if u.is_empty() {
+                app.set_status(format!("No open PR found for branch '{}'.", branch));
+                return Ok(());
+            }
+            u
+        }
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            app.set_status(format!("gh error: {}", err));
+            return Ok(());
+        }
+        Err(e) => {
+            app.set_status(format!("Failed to run gh: {}", e));
+            return Ok(());
+        }
+    };
+
+    // Open in default browser.
+    #[cfg(target_os = "macos")]
+    let open_cmd = "open";
+    #[cfg(not(target_os = "macos"))]
+    let open_cmd = "xdg-open";
+
+    match std::process::Command::new(open_cmd).arg(&url).status() {
+        Ok(_) => app.set_status(format!("Opened PR in browser: {}", url)),
+        Err(e) => app.set_status(format!("Failed to open browser: {}", e)),
+    }
+
+    Ok(())
+}
+
 pub fn attach_to_window(session: &str, base_name: &str, full_name: &str) {
     use std::process::Command;
     let target_full = format!("{}:{}", session, full_name);

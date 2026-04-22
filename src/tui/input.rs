@@ -287,6 +287,12 @@ fn handle_normal(app: &mut App, code: KeyCode) -> Result<()> {
                 }
             }
         }
+        KeyCode::Char('o') if !is_burst => {
+            if !app.require_worktree_selected() {
+                return Ok(());
+            }
+            super::actions::execute_open_pr(app)?;
+        }
         KeyCode::Char('a') if !is_burst => {
             let phase = app.selected_phase().to_string();
             if !app.require_worktree_selected() {

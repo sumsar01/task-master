@@ -131,7 +131,7 @@ fn header_stats_text(app: &App) -> String {
 /// Number of lines the Actions panel body occupies (excluding its border).
 /// Keep in sync with `render_actions` content. Border adds 2, so the block
 /// height passed to `Constraint::Length` is ACTIONS_LINES + 2.
-const ACTIONS_LINES: u16 = 23;
+const ACTIONS_LINES: u16 = 24;
 
 /// Fixed height of the detail pane when it shares the right column with
 /// another pane (preview).  Border adds 2, so actual block height = DETAIL_LINES + 2.
@@ -302,6 +302,7 @@ fn render_actions(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
     lines.push(action_line('p', &plan_label, has_wt, false, t));
     lines.push(Line::from(""));
     lines.push(action_line('x', "qa  (enter PR #)", has_wt, !active, t));
+    lines.push(action_line('o', "open PR in browser", has_wt, false, t));
     lines.push(action_line('m', "send message", has_wt, !active, t));
     lines.push(action_line('b', "send (build mode)", has_wt, !active, t));
     lines.push(Line::from(""));

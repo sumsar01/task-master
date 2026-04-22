@@ -6,13 +6,6 @@ use tracing::debug;
 /// Gives tmux time to process the kill and update its internal window list.
 const KILL_WINDOW_SETTLE_MS: u64 = 300;
 
-/// How long to wait (ms) after sending a Tab keypress to opencode before sending
-/// the prompt text. Tab switches between the two primary agents (plan ↔ build);
-/// opencode must finish processing the mode switch before the prompt arrives or
-/// the message lands in the wrong agent. 800ms covers observed worst-case
-/// latency on slow machines; increase if the race still triggers.
-const TAB_SETTLE_MS: u64 = 800;
-
 /// Minimum run of consecutive spaces that marks the start of the tmux sidebar
 /// column separator. The first 20 visible characters are skipped before scanning.
 const SIDEBAR_MIN_RUN_LEN: usize = 8;
@@ -194,15 +187,25 @@ pub fn send_to_window(session: &str, base_name: &str, prompt: &str) -> Result<()
     Ok(())
 }
 
+/// How long to wait between pane-content polls when waiting for the opencode
+/// agent indicator to change after a Tab keypress.
+const TAB_POLL_INTERVAL_MS: u64 = 100;
+
+/// Maximum total time (ms) to wait for the opencode agent indicator to change
+/// after a Tab keypress before giving up and sending the prompt anyway.
+const TAB_POLL_TIMEOUT_MS: u64 = 5_000;
+
 /// Send a Tab keypress to switch the opencode session to the next primary agent,
 /// then send a prompt to it.
 ///
-/// Used to switch from plan mode to build mode: after TM-r0u, the only project-
-/// defined primary agents are `plan` and `build`, so one Tab press from plan
+/// Used to switch from plan mode to build mode: the only project-defined
+/// primary agents are `plan` and `build`, so one Tab press from plan
 /// reliably lands on build.
 ///
-/// Finds the window by base name (ignoring any phase suffix), sends Tab, then
-/// the prompt text followed by Enter.
+/// After sending Tab, polls the pane content every TAB_POLL_INTERVAL_MS until
+/// the plan-agent indicator (`"Plan ·"`) disappears from the status bar, then
+/// sends the prompt. Falls back to sending after TAB_POLL_TIMEOUT_MS if the
+/// indicator never changes (e.g. capture_pane unavailable).
 pub fn send_tab_then_message(session: &str, base_name: &str, prompt: &str) -> Result<()> {
     let idx = find_window_index(session, base_name).with_context(|| {
         format!(
@@ -212,10 +215,30 @@ pub fn send_tab_then_message(session: &str, base_name: &str, prompt: &str) -> Re
     })?;
     let target = format!("{}:{}", session, idx);
     tmux(&["send-keys", "-t", &target, "Tab"])?;
-    // Give opencode time to process the Tab and complete the mode switch before
-    // the prompt text arrives. Without this delay the message lands in the wrong
-    // agent (plan) because the switch hasn't finished yet.
-    std::thread::sleep(std::time::Duration::from_millis(TAB_SETTLE_MS));
+
+    // Poll until the opencode status bar no longer shows "Plan ·" (meaning the
+    // agent switch is complete) or until the timeout is reached. This is more
+    // reliable than a fixed sleep because it reacts to the actual UI change
+    // rather than guessing how long the switch takes.
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(TAB_POLL_TIMEOUT_MS);
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(TAB_POLL_INTERVAL_MS));
+        if std::time::Instant::now() >= deadline {
+            // Timeout — send the message anyway as a best-effort fallback.
+            break;
+        }
+        if let Some(lines) = capture_pane(session, base_name) {
+            // opencode renders the active agent name in the status bar as e.g.
+            // "Plan · Claude Sonnet 4.6" (capital P for the plan agent).
+            // Once Tab has taken effect this line changes to "build · …".
+            let still_plan = lines.iter().any(|l| l.contains("Plan \u{00b7}"));
+            if !still_plan {
+                break;
+            }
+        }
+    }
+
     tmux(&["send-keys", "-t", &target, prompt])?;
     tmux(&["send-keys", "-t", &target, "Enter"])?;
     Ok(())

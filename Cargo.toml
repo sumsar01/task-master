@@ -1,6 +1,6 @@
 [package]
 name = "task-master"
-version = "0.2.33"
+version = "0.2.34"
 edition = "2024"
 
 [dependencies]

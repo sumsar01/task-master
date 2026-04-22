@@ -220,6 +220,10 @@ pub fn send_tab_then_message(session: &str, base_name: &str, prompt: &str) -> Re
     // agent switch is complete) or until the timeout is reached. This is more
     // reliable than a fixed sleep because it reacts to the actual UI change
     // rather than guessing how long the switch takes.
+    //
+    // Important: use capture_pane_plain (no -e flag) so the text is free of
+    // ANSI escape sequences. With -e the "Plan ·" substring is broken up by
+    // color codes and contains() never matches.
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_millis(TAB_POLL_TIMEOUT_MS);
     loop {
@@ -228,10 +232,10 @@ pub fn send_tab_then_message(session: &str, base_name: &str, prompt: &str) -> Re
             // Timeout — send the message anyway as a best-effort fallback.
             break;
         }
-        if let Some(lines) = capture_pane(session, base_name) {
+        if let Some(lines) = capture_pane_plain(session, base_name) {
             // opencode renders the active agent name in the status bar as e.g.
             // "Plan · Claude Sonnet 4.6" (capital P for the plan agent).
-            // Once Tab has taken effect this line changes to "build · …".
+            // Once Tab has taken effect this line changes to "Build · …".
             let still_plan = lines.iter().any(|l| l.contains("Plan \u{00b7}"));
             if !still_plan {
                 break;
@@ -433,6 +437,28 @@ fn strip_sidebar_column(line: &str) -> String {
 
     // No wide gap found — just trim trailing whitespace.
     line.trim_end().to_string()
+}
+
+/// Capture the current visible content of the tmux pane as plain text (no ANSI
+/// escape sequences). Used for text-matching (e.g. detecting the agent indicator
+/// in the opencode status bar) where ANSI codes would break substring searches.
+///
+/// Returns `None` if the window does not exist or the capture fails.
+fn capture_pane_plain(session: &str, base_name: &str) -> Option<Vec<String>> {
+    let idx = find_window_index(session, base_name)?;
+    let target = format!("{}:{}", session, idx);
+
+    let output = Command::new("tmux")
+        .args(["capture-pane", "-p", "-t", &target])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    Some(text.lines().map(|l| l.to_string()).collect())
 }
 
 /// Capture the current visible content of the tmux pane for the given worktree.

@@ -240,6 +240,9 @@ pub struct App {
     /// Receives the result of a background operation spawned in Mode::Cloning.
     /// `Some` while `Mode::Cloning` is active; `None` otherwise.
     pub clone_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    /// Lightweight one-shot channel for background ops that don't need Mode::Cloning
+    /// (e.g. opening a PR in the browser). Polled every frame; result sets the status bar.
+    pub bg_status_rx: Option<std::sync::mpsc::Receiver<String>>,
     /// Human-readable label shown next to the spinner, e.g. "Cloning my-service…".
     pub cloning_label: String,
     /// Current frame index for the braille spinner (0–7, wraps).
@@ -346,6 +349,7 @@ impl App {
             group_cycle_options: Vec::new(),
             context_cycle_options: Vec::new(),
             clone_rx: None,
+            bg_status_rx: None,
             cloning_label: String::new(),
             spinner_frame: 0,
             cloning_op: CloningOp::AddProject,

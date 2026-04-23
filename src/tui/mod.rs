@@ -65,6 +65,15 @@ fn run_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut 
             terminal.clear()?;
         }
 
+        // Poll lightweight background status channel (e.g. open-PR-in-browser).
+        // Always active regardless of mode so the TUI stays fully responsive.
+        if let Some(rx) = &app.bg_status_rx {
+            if let Ok(msg) = rx.try_recv() {
+                app.set_status(msg);
+                app.bg_status_rx = None;
+            }
+        }
+
         // While cloning, poll the result channel and advance the spinner.
         if app.mode == Mode::Cloning {
             if let Some(rx) = &app.clone_rx {

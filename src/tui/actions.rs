@@ -768,15 +768,16 @@ pub fn collect_spawn_inputs(app: &mut App) -> Option<(String, String)> {
 
 /// Open the PR for the selected worktree's current branch in the default browser.
 ///
-/// Uses `gh pr view <branch> --json url --jq '.url'` to get the PR URL, then
-/// opens it with `open` (macOS) or `xdg-open` (Linux).
+/// Branch detection is synchronous (local, instant). The `gh pr view` network
+/// call and browser open are dispatched to a background thread so the TUI
+/// stays fully responsive. Result is delivered via `app.bg_status_rx`.
 pub fn execute_open_pr(app: &mut App) -> Result<()> {
     let wt = match app.selected_worktree() {
         Some(w) => w.clone(),
         None => return Ok(()),
     };
 
-    // Get current branch name.
+    // Get current branch name synchronously — this is a local git operation, instant.
     let branch_out = std::process::Command::new("git")
         .args(["-C", wt.abs_path.to_str().unwrap_or("."), "rev-parse", "--abbrev-ref", "HEAD"])
         .output();
@@ -788,42 +789,52 @@ pub fn execute_open_pr(app: &mut App) -> Result<()> {
         }
     };
 
-    // Look up PR URL via gh.
-    let pr_out = std::process::Command::new("gh")
-        .args(["pr", "view", &branch, "--json", "url", "--jq", ".url"])
-        .current_dir(&wt.abs_path)
-        .output();
-    let url = match pr_out {
-        Ok(o) if o.status.success() => {
-            let u = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if u.is_empty() {
-                app.set_status(format!("No open PR found for branch '{}'.", branch));
-                return Ok(());
+    // Show immediate feedback so the user knows the key press registered.
+    app.set_status(format!("Looking up PR for '{}'…", branch));
+
+    // Spawn background thread for the network call + browser open.
+    let abs_path = wt.abs_path.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        // Look up PR URL via gh.
+        let pr_out = std::process::Command::new("gh")
+            .args(["pr", "view", &branch, "--json", "url", "--jq", ".url"])
+            .current_dir(&abs_path)
+            .output();
+
+        let url = match pr_out {
+            Ok(o) if o.status.success() => {
+                let u = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if u.is_empty() {
+                    let _ = tx.send(format!("No open PR found for branch '{}'.", branch));
+                    return;
+                }
+                u
             }
-            u
-        }
-        Ok(o) => {
-            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
-            app.set_status(format!("gh error: {}", err));
-            return Ok(());
-        }
-        Err(e) => {
-            app.set_status(format!("Failed to run gh: {}", e));
-            return Ok(());
-        }
-    };
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                let _ = tx.send(format!("gh error: {}", err));
+                return;
+            }
+            Err(e) => {
+                let _ = tx.send(format!("Failed to run gh: {}", e));
+                return;
+            }
+        };
 
-    // Open in default browser.
-    #[cfg(target_os = "macos")]
-    let open_cmd = "open";
-    #[cfg(not(target_os = "macos"))]
-    let open_cmd = "xdg-open";
+        // Open in default browser.
+        #[cfg(target_os = "macos")]
+        let open_cmd = "open";
+        #[cfg(not(target_os = "macos"))]
+        let open_cmd = "xdg-open";
 
-    match std::process::Command::new(open_cmd).arg(&url).status() {
-        Ok(_) => app.set_status(format!("Opened PR in browser: {}", url)),
-        Err(e) => app.set_status(format!("Failed to open browser: {}", e)),
-    }
+        match std::process::Command::new(open_cmd).arg(&url).status() {
+            Ok(_) => { let _ = tx.send(format!("Opened PR in browser: {}", url)); }
+            Err(e) => { let _ = tx.send(format!("Failed to open browser: {}", e)); }
+        }
+    });
 
+    app.bg_status_rx = Some(rx);
     Ok(())
 }
 

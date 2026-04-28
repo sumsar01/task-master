@@ -424,6 +424,7 @@ pub fn write_git_identity_to_repo(
     repo_path: &Path,
     name: Option<&str>,
     email: Option<&str>,
+    signing_key: Option<&str>,
 ) -> Result<()> {
     let (name, email) = match (name, email) {
         (Some(n), Some(e)) => (n, e),
@@ -466,6 +467,33 @@ pub fn write_git_identity_to_repo(
     // agent session (QA, plan, e2e).
     git_config("credential.https://github.com.username", name)?;
 
+    // Apply SSH commit-signing config if a signing key is specified.
+    // This overrides any `includeIf` rule in ~/.gitconfig that might inject a
+    // different signing key (e.g. a personal key when the bare repo lives under a
+    // personal-account directory tree).
+    if let Some(key_path) = signing_key {
+        // Expand a leading `~/` to the user's home directory so the path works
+        // in git config even when git doesn't expand tildes in this field.
+        let expanded = if key_path.starts_with("~/") {
+            if let Some(home) = std::env::var_os("HOME") {
+                format!("{}/{}", home.to_string_lossy(), &key_path[2..])
+            } else {
+                key_path.to_string()
+            }
+        } else {
+            key_path.to_string()
+        };
+        git_config("gpg.format", "ssh")?;
+        git_config("gpg.ssh.signingKey", &expanded)?;
+        git_config("commit.gpgsign", "true")?;
+        git_config("tag.gpgsign", "true")?;
+        info!(
+            "Set SSH signing key in '{}': signingKey={}",
+            repo_path.display(),
+            expanded,
+        );
+    }
+
     info!(
         "Set git identity in '{}': name={}, email={}, credential_username={}",
         repo_path.display(),
@@ -476,8 +504,8 @@ pub fn write_git_identity_to_repo(
     Ok(())
 }
 
-/// Apply the `git_name`/`git_email` identity overrides for every project in the
-/// registry that has them configured.
+/// Apply the `git_name`/`git_email`/`git_signing_key` identity overrides for every
+/// project in the registry that has them configured.
 ///
 /// This is the one-shot repair for bare repos that were created before the
 /// per-project identity feature existed.  It is idempotent — running it multiple
@@ -492,11 +520,12 @@ pub fn cmd_fix_git_identity(registry: &Registry, base_dir: &PathBuf) -> Result<S
     for proj in &registry.projects {
         let name = proj.git_name.as_deref();
         let email = proj.git_email.as_deref();
+        let signing_key = proj.git_signing_key.as_deref();
 
-        if name.is_none() && email.is_none() {
+        if name.is_none() && email.is_none() && signing_key.is_none() {
             skipped += 1;
             info!(
-                "Skipping '{}' — no git_name/git_email configured",
+                "Skipping '{}' — no git_name/git_email/git_signing_key configured",
                 proj.short
             );
             continue;
@@ -513,14 +542,15 @@ pub fn cmd_fix_git_identity(registry: &Registry, base_dir: &PathBuf) -> Result<S
             continue;
         }
 
-        match write_git_identity_to_repo(&repo_path, name, email) {
+        match write_git_identity_to_repo(&repo_path, name, email, signing_key) {
             Ok(()) => {
                 updated += 1;
                 println!(
-                    "  {} → name={}, email={}",
+                    "  {} → name={}, email={}, signing_key={}",
                     proj.short,
                     name.unwrap_or("(unchanged)"),
-                    email.unwrap_or("(unchanged)")
+                    email.unwrap_or("(unchanged)"),
+                    signing_key.unwrap_or("(unchanged)"),
                 );
             }
             Err(e) => {
@@ -627,6 +657,7 @@ pub fn cmd_add_worktree(
         &repo_path,
         project.git_name.as_deref(),
         project.git_email.as_deref(),
+        project.git_signing_key.as_deref(),
     ) {
         Ok(()) => {}
         Err(e) => eprintln!(
@@ -792,6 +823,7 @@ pub fn create_ephemeral_worktree(
         &repo_path,
         project.git_name.as_deref(),
         project.git_email.as_deref(),
+        project.git_signing_key.as_deref(),
     ) {
         Ok(()) => {}
         Err(e) => eprintln!(
@@ -1787,7 +1819,7 @@ repo = "projects/beta"
         let bare = root.path().join("myrepo.git");
         make_bare_repo(&bare);
 
-        write_git_identity_to_repo(&bare, Some("Alice"), Some("alice@example.com")).unwrap();
+        write_git_identity_to_repo(&bare, Some("Alice"), Some("alice@example.com"), None).unwrap();
 
         // Read back via git config.
         let name = Command::new("git")
@@ -1830,6 +1862,7 @@ repo = "projects/beta"
             &bare,
             Some("skrwhiteaway"),
             Some("98815660+skrwhiteaway@users.noreply.github.com"),
+            None,
         )
         .unwrap();
 
@@ -1862,7 +1895,7 @@ repo = "projects/beta"
         let bare = root.path().join("cred_noop.git");
         make_bare_repo(&bare);
 
-        write_git_identity_to_repo(&bare, None, None).unwrap();
+        write_git_identity_to_repo(&bare, None, None, None).unwrap();
 
         let out = Command::new("git")
             .args(["-C"])
@@ -1887,7 +1920,7 @@ repo = "projects/beta"
         make_bare_repo(&bare);
 
         // Should not error and should not write anything into the local repo config.
-        write_git_identity_to_repo(&bare, None, None).unwrap();
+        write_git_identity_to_repo(&bare, None, None, None).unwrap();
 
         // user.name must not be set in the LOCAL repo config (--local skips global fallback).
         let out = Command::new("git")
@@ -1909,7 +1942,7 @@ repo = "projects/beta"
         make_bare_repo(&bare);
 
         // Only email provided — function should be a no-op (both must be Some).
-        write_git_identity_to_repo(&bare, None, Some("bob@example.com")).unwrap();
+        write_git_identity_to_repo(&bare, None, Some("bob@example.com"), None).unwrap();
 
         let out = Command::new("git")
             .args(["-C"])
@@ -1929,8 +1962,8 @@ repo = "projects/beta"
         let bare = root.path().join("idem.git");
         make_bare_repo(&bare);
 
-        write_git_identity_to_repo(&bare, Some("Carol"), Some("carol@example.com")).unwrap();
-        write_git_identity_to_repo(&bare, Some("Carol"), Some("carol@example.com")).unwrap();
+        write_git_identity_to_repo(&bare, Some("Carol"), Some("carol@example.com"), None).unwrap();
+        write_git_identity_to_repo(&bare, Some("Carol"), Some("carol@example.com"), None).unwrap();
 
         let email = Command::new("git")
             .args(["-C"])
@@ -1950,8 +1983,8 @@ repo = "projects/beta"
         let bare = root.path().join("overwrite.git");
         make_bare_repo(&bare);
 
-        write_git_identity_to_repo(&bare, Some("Old Name"), Some("old@example.com")).unwrap();
-        write_git_identity_to_repo(&bare, Some("New Name"), Some("new@example.com")).unwrap();
+        write_git_identity_to_repo(&bare, Some("Old Name"), Some("old@example.com"), None).unwrap();
+        write_git_identity_to_repo(&bare, Some("New Name"), Some("new@example.com"), None).unwrap();
 
         let name = Command::new("git")
             .args(["-C"])

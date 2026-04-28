@@ -30,6 +30,13 @@ theme = "tokyonight"
 #               these values into the bare repo's git config so all linked worktrees inherit
 #               the correct identity automatically.  Run `task-master fix-git-identity` once
 #               to apply the values to existing bare repos.
+#   git_signing_key — (optional) path to the SSH private key used to sign commits.
+#               Set this when an includeIf rule in ~/.gitconfig would inject the wrong signing
+#               key (e.g. a personal key for repos stored under a personal-account directory).
+#               task-master writes gpg.format=ssh, gpg.ssh.signingKey, commit.gpgsign=true,
+#               and tag.gpgsign=true into the bare repo config, overriding any includeIf value.
+#               E.g. git_signing_key = "~/.ssh/id_rsa"
+#               Run `task-master fix-git-identity` to apply to existing bare repos.
 #   ephemeral_prefix        — (optional) word prefix for auto-generated ephemeral worktree
 #               names used by `task-master spawn --ephemeral`.
 #               E.g. "spruce" produces names like "SVC-spruce-7f3a".

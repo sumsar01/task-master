@@ -58,6 +58,19 @@ pub struct ProjectConfig {
     /// Optional git `user.email` override — see `git_name` for details.
     #[serde(default)]
     pub git_email: Option<String>,
+    /// Optional SSH private-key path used for signing commits in this project's worktrees.
+    ///
+    /// When set, `write_git_identity_to_repo` writes the following into the bare-repo config:
+    ///   gpg.format = ssh
+    ///   gpg.ssh.signingKey = <path>
+    ///   commit.gpgsign = true
+    ///   tag.gpgsign = true
+    ///
+    /// This overrides any `includeIf` rule in `~/.gitconfig` that would inject a different
+    /// signing key (e.g. a personal key for a personal GitHub account directory tree).
+    /// The value should be the path to the **private** key file (e.g. `~/.ssh/id_rsa`).
+    #[serde(default)]
+    pub git_signing_key: Option<String>,
     /// Optional word prefix for auto-generated ephemeral worktree names.
     /// E.g. "spruce" produces names like "spruce-7f3a".
     /// When absent, a random word is chosen from the built-in adjective list.

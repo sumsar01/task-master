@@ -302,6 +302,7 @@ fn render_actions(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
     lines.push(action_line('p', &plan_label, has_wt, false, t));
     lines.push(Line::from(""));
     lines.push(action_line('x', "qa  (enter PR #)", has_wt, !active, t));
+    lines.push(action_line('e', "e2e (enter PR #)", has_wt, false, t));
     lines.push(action_line('o', "open PR in browser", has_wt, false, t));
     lines.push(action_line('m', "send message", has_wt, !active, t));
     lines.push(action_line('b', "send (build mode)", has_wt, !active, t));
@@ -584,6 +585,10 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
             " Task prompt for ephemeral worktree…  Esc to cancel".to_string(),
             t.text_dim_style(),
         ),
+        Mode::Prompt(crate::tui::ActionKind::E2e) => (
+            " E2e prompt…  enter PR number  Esc to cancel".to_string(),
+            t.text_dim_style(),
+        ),
         Mode::ConfirmCleanup => (String::new(), t.text_dim_style()),
         Mode::ForceConfirm => (
             " Press Enter to force-spawn (discards uncommitted changes), Esc to cancel".to_string(),
@@ -647,6 +652,7 @@ fn render_context_hints(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
                     &[
                         ("s", "spawn"),
                         ("x", "qa"),
+                        ("e", "e2e"),
                         ("m", "message"),
                         ("r", "reset"),
                         ("a", "attach"),
@@ -656,6 +662,7 @@ fn render_context_hints(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
                     &[
                         ("s", "spawn"),
                         ("p", "plan"),
+                        ("e", "e2e"),
                         ("N", "new worktree"),
                         ("c", "close"),
                         ("?", "help"),

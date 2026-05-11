@@ -54,6 +54,7 @@ pub fn execute_action(app: &mut App, kind: &ActionKind, force: bool) -> Result<(
         ActionKind::AddWorktree => execute_add_worktree(app),
         ActionKind::AddProject => execute_add_project(app),
         ActionKind::SpawnEphemeral => execute_spawn_ephemeral(app),
+        ActionKind::E2e => execute_e2e(app),
     }
 }
 
@@ -243,6 +244,38 @@ pub fn execute_qa(app: &mut App) -> Result<()> {
         }
         Err(e) => {
             app.set_status(format!("QA failed: {}", e));
+            app.reset_input();
+        }
+    }
+    Ok(())
+}
+
+pub fn execute_e2e(app: &mut App) -> Result<()> {
+    let wt_name = match app.selected_worktree() {
+        Some(wt) => wt.window_name.clone(),
+        None => return Ok(()),
+    };
+    let pr_number: u64 = match app.input_buf.trim().parse() {
+        Ok(n) => n,
+        Err(_) => {
+            app.set_status("Invalid PR number — enter a number (e.g. 42)");
+            return Ok(());
+        }
+    };
+    match crate::e2e::cmd_e2e(&app.registry, &wt_name, pr_number) {
+        Ok(_) => {
+            refocus_tui_window(&app.session, &app.tui_window_id);
+            app.set_status(format!(
+                "E2e agent started for {} PR #{}",
+                wt_name, pr_number
+            ));
+            let hist_entry = app.input_buf.trim().to_string();
+            push_history(app, &hist_entry);
+            app.reset_input();
+            app.refresh_phases();
+        }
+        Err(e) => {
+            app.set_status(format!("E2e failed: {}", e));
             app.reset_input();
         }
     }

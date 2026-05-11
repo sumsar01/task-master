@@ -245,6 +245,21 @@ fn handle_normal(app: &mut App, code: KeyCode) -> Result<()> {
             app.input_buf.clear();
             app.mode = Mode::Prompt(ActionKind::Qa);
         }
+        KeyCode::Char('e') if !is_burst => {
+            if !app.require_worktree_selected() {
+                return Ok(());
+            }
+            let phase = app.selected_phase().to_string();
+            if App::is_active_phase(&phase) {
+                app.set_status(format!(
+                    "Warning: {} is [{}] — e2e will overwrite the running agent. Enter PR number and press Enter, Esc to cancel.",
+                    app.selected_worktree().map(|w| w.window_name.as_str()).unwrap_or("?"),
+                    phase
+                ));
+            }
+            app.input_buf.clear();
+            app.mode = Mode::Prompt(ActionKind::E2e);
+        }
         KeyCode::Char('m') if !is_burst => {
             if !app.require_worktree_selected() {
                 return Ok(());

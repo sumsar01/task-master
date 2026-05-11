@@ -69,6 +69,9 @@ pub enum ActionKind {
     /// User typed an agent task prompt; Enter calls execute_spawn_ephemeral
     /// (worktree name is auto-generated).
     SpawnEphemeral,
+    /// User typed a PR number; Enter calls execute_e2e which spawns the e2e
+    /// validation agent for the selected worktree.
+    E2e,
 }
 
 /// Tracks which input step the add-project flow is on.

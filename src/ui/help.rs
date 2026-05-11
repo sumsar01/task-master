@@ -45,6 +45,7 @@ const KEYBINDINGS: &[(&str, &str, &str)] = &[
     ("s", "spawn dev agent (prompts for task)", ""),
     ("p", "start planning agent (prompts for task)", ""),
     ("x", "run QA agent (prompts for PR #)", ""),
+    ("e", "run e2e validation agent (prompts for PR #)", ""),
     ("m", "send message to active agent", ""),
     ("b", "send message and switch to build mode", ""),
     ("r", "reset active window to idle", ""),

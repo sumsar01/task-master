@@ -1,5 +1,5 @@
 use crate::stats::format_tokens;
-use crate::tui::{App, ListEntry};
+use crate::tui::{App, ListEntry, PrInfo};
 use crate::ui::theme::Theme;
 use ansi_to_tui::IntoText;
 use ratatui::{
@@ -135,7 +135,7 @@ const ACTIONS_LINES: u16 = 24;
 
 /// Fixed height of the detail pane when it shares the right column with
 /// another pane (preview).  Border adds 2, so actual block height = DETAIL_LINES + 2.
-const DETAIL_LINES: u16 = 10;
+const DETAIL_LINES: u16 = 20;
 
 fn render_content(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) {
     let (left_pct, right_pct) = if area.width >= SPLIT_THRESHOLD {
@@ -393,7 +393,9 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
         return;
     }
 
-    let lines: Vec<Line> = app
+    let wt_idx = app.selected_worktree_idx();
+
+    let mut lines: Vec<Line> = app
         .detail_lines
         .iter()
         .map(|s| {
@@ -410,7 +412,112 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
         })
         .collect();
 
+    // ── Pull Request section ──────────────────────────────────────────────────
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Pull Request:",
+        t.text_style().add_modifier(Modifier::BOLD),
+    )));
+
+    match wt_idx.and_then(|i| app.pr_info_cache.get(&i)) {
+        None => {
+            // Fetch in flight or not yet triggered.
+            lines.push(Line::from(Span::styled(
+                "    fetching…",
+                t.text_dim_style(),
+            )));
+        }
+        Some(None) => {
+            // Fetched; no PR found.
+            lines.push(Line::from(Span::styled(
+                "    none",
+                t.text_dim_style(),
+            )));
+        }
+        Some(Some(pr)) => {
+            // PR number + title
+            lines.push(Line::from(vec![
+                Span::styled("    PR #", t.text_dim_style()),
+                Span::styled(
+                    format!("{}: {}", pr.number, pr.title),
+                    t.text_style()
+                        .fg(t.text_accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+
+            // State (with draft override)
+            let (state_label, state_color) = pr_state_display(pr, t);
+            lines.push(Line::from(vec![
+                Span::styled("    State:  ", t.text_dim_style()),
+                Span::styled(state_label, t.text_style().fg(state_color)),
+            ]));
+
+            // Review decision
+            let (review_label, review_color) = pr_review_display(pr, t);
+            lines.push(Line::from(vec![
+                Span::styled("    Review: ", t.text_dim_style()),
+                Span::styled(review_label, t.text_style().fg(review_color)),
+            ]));
+
+            // CI checks
+            let (checks_label, checks_color) = pr_checks_display(pr, t);
+            lines.push(Line::from(vec![
+                Span::styled("    Checks: ", t.text_dim_style()),
+                Span::styled(checks_label, t.text_style().fg(checks_color)),
+            ]));
+
+            // URL
+            lines.push(Line::from(Span::styled(
+                format!("    {}", pr.url),
+                t.text_dim_style(),
+            )));
+        }
+    }
+
     f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+// ---------------------------------------------------------------------------
+// PR display helpers
+// ---------------------------------------------------------------------------
+
+/// Returns (display label, color) for the PR state field.
+fn pr_state_display(pr: &PrInfo, t: &Theme) -> (String, Color) {
+    if pr.state == "OPEN" && pr.draft {
+        ("DRAFT ◐".to_string(), t.phase_plan_qa) // yellow
+    } else {
+        match pr.state.as_str() {
+            "OPEN" => ("OPEN ●".to_string(), t.phase_dev),            // green
+            "MERGED" => ("MERGED ✓".to_string(), Color::Rgb(189, 147, 249)), // purple
+            "CLOSED" => ("CLOSED ✗".to_string(), t.phase_error),      // red
+            other => (other.to_string(), t.text_dim),
+        }
+    }
+}
+
+/// Returns (display label, color) for the review decision field.
+fn pr_review_display(pr: &PrInfo, t: &Theme) -> (String, Color) {
+    match pr.review_decision.as_deref() {
+        Some("APPROVED") => ("APPROVED ✓".to_string(), t.phase_dev),
+        Some("CHANGES_REQUESTED") => ("CHANGES_REQUESTED ✗".to_string(), t.phase_error),
+        Some("REVIEW_REQUIRED") => ("REVIEW_REQUIRED …".to_string(), t.phase_plan_qa),
+        Some(other) if !other.is_empty() => (other.to_string(), t.text_dim),
+        _ => ("(none)".to_string(), t.text_dim),
+    }
+}
+
+/// Returns (display label, color) for the CI checks rollup field.
+fn pr_checks_display(pr: &PrInfo, t: &Theme) -> (String, Color) {
+    match pr.checks.as_deref() {
+        Some("SUCCESS") => ("SUCCESS ✓".to_string(), t.phase_dev),
+        Some("FAILURE") => ("FAILURE ✗".to_string(), t.phase_error),
+        Some("PENDING") | Some("IN_PROGRESS") | Some("QUEUED") => {
+            ("PENDING …".to_string(), t.phase_plan_qa)
+        }
+        Some(other) => (other.to_string(), t.text_dim),
+        None => ("(no checks)".to_string(), t.text_dim),
+    }
 }
 
 // ---------------------------------------------------------------------------

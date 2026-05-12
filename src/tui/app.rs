@@ -9,6 +9,89 @@ use std::{
 };
 
 // ---------------------------------------------------------------------------
+// PR info model
+// ---------------------------------------------------------------------------
+
+/// Information about a GitHub pull request associated with a worktree branch.
+#[derive(Debug, Clone)]
+pub struct PrInfo {
+    pub number: u32,
+    pub title: String,
+    /// "OPEN" | "MERGED" | "CLOSED"
+    pub state: String,
+    pub url: String,
+    /// true when the PR is in draft state (state will be "OPEN")
+    pub draft: bool,
+    /// "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | "" | None
+    pub review_decision: Option<String>,
+    /// "SUCCESS" | "FAILURE" | "PENDING" | None
+    pub checks: Option<String>,
+}
+
+/// Fetch PR info for the worktree at `path` by running `gh pr view`.
+///
+/// Returns `None` when:
+/// - `gh` is not available
+/// - no open (or recent) PR exists for the current branch
+/// - the output cannot be parsed
+///
+/// This function is intentionally **synchronous** — it is meant to be called
+/// from a background thread, not the TUI event loop.
+pub fn fetch_pr_info(path: &str) -> Option<PrInfo> {
+    let output = std::process::Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            "--json",
+            "number,title,state,url,isDraft,reviewDecision,statusCheckRollup",
+        ])
+        .current_dir(path)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+
+    let number = v["number"].as_u64()? as u32;
+    let title = v["title"].as_str().unwrap_or("").to_string();
+    let state = v["state"].as_str().unwrap_or("").to_string();
+    let url = v["url"].as_str().unwrap_or("").to_string();
+    let draft = v["isDraft"].as_bool().unwrap_or(false);
+
+    let review_decision = match v["reviewDecision"].as_str() {
+        Some(s) if !s.is_empty() => Some(s.to_string()),
+        _ => None,
+    };
+
+    // statusCheckRollup is an array; take the first element's `state` field.
+    // gh aggregates all checks; pick the first which is the rolled-up result.
+    let checks = v["statusCheckRollup"]
+        .as_array()
+        .and_then(|arr| arr.first())
+        .and_then(|entry| entry["state"].as_str())
+        .map(|s| s.to_string());
+
+    Some(PrInfo {
+        number,
+        title,
+        state,
+        url,
+        draft,
+        review_decision,
+        checks,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // List entry model
 // ---------------------------------------------------------------------------
 
@@ -189,6 +272,14 @@ pub struct App {
     pub detail_lines: Vec<String>,
     /// Worktree index whose detail is currently cached.
     pub last_detail_idx: Option<usize>,
+    /// PR info cache keyed by worktree index.
+    /// - Missing key  → not yet fetched for this index
+    /// - `Some(None)` → fetched; no PR found
+    /// - `Some(Some(info))` → fetched; PR data available
+    pub pr_info_cache: HashMap<usize, Option<PrInfo>>,
+    /// Receive end of the background PR-fetch channel.
+    /// `Some` while a fetch is in flight; `None` otherwise.
+    pub pr_info_rx: Option<std::sync::mpsc::Receiver<(usize, Option<PrInfo>)>>,
 
     // ── Overlays ──────────────────────────────────────────────────────────────
     pub show_theme_picker: bool,
@@ -329,6 +420,8 @@ impl App {
             show_detail: false,
             detail_lines: Vec::new(),
             last_detail_idx: None,
+            pr_info_cache: HashMap::new(),
+            pr_info_rx: None,
             show_theme_picker: false,
             show_help: false,
             theme_picker_cursor,
@@ -796,6 +889,9 @@ impl App {
     ///   - Current branch name (`git rev-parse --abbrev-ref HEAD`)
     ///   - Count of uncommitted changes (`git status --porcelain`)
     ///   - Last 5 commit subjects (`git log --oneline -5`)
+    ///
+    /// PR information is fetched asynchronously via a background thread.
+    /// The result arrives in `pr_info_rx` and is polled by the run_loop.
     pub fn refresh_detail(&mut self) {
         let wt = match self.selected_worktree() {
             Some(w) => w.clone(),
@@ -837,6 +933,19 @@ impl App {
 
         self.detail_lines = lines;
         self.last_detail_idx = Some(wt_idx);
+
+        // Kick off async PR fetch if we don't already have data for this index
+        // or if a previous fetch is not already in flight for the same index.
+        // We always re-fetch on selection change so the data stays fresh.
+        let already_fetching = self.pr_info_rx.is_some();
+        if !already_fetching {
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.pr_info_rx = Some(rx);
+            std::thread::spawn(move || {
+                let info = fetch_pr_info(&path);
+                let _ = tx.send((wt_idx, info));
+            });
+        }
     }
 
     pub fn load_stats_for_selected(&mut self) {
@@ -956,6 +1065,8 @@ impl App {
         self.last_detail_idx = None;
         self.preview_lines.clear();
         self.detail_lines.clear();
+        self.pr_info_cache.clear();
+        self.pr_info_rx = None;
 
         // Sync collapse state from the new registry (another process may have written it).
         self.group_collapsed = new_registry.group_states.clone();

@@ -3,7 +3,7 @@ mod app;
 mod input;
 
 // Re-export everything external callers depend on.
-pub use app::{ActionKind, AddProjectStep, App, CloningOp, ListEntry, Mode};
+pub use app::{ActionKind, AddProjectStep, App, CloningOp, ListEntry, Mode, PrInfo};
 
 use crate::registry::Registry;
 use crate::tmux;
@@ -71,6 +71,24 @@ fn run_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut 
             if let Ok(msg) = rx.try_recv() {
                 app.set_status(msg);
                 app.bg_status_rx = None;
+            }
+        }
+
+        // Poll background PR-info fetch channel.
+        // The result is a (worktree_idx, Option<PrInfo>) pair.
+        // We store it in the cache only if the worktree is still the one
+        // that was selected when the fetch was kicked off (guards against
+        // a race where the user moved to a different worktree while fetching).
+        if let Some(rx) = &app.pr_info_rx {
+            match rx.try_recv() {
+                Ok((wt_idx, info)) => {
+                    app.pr_info_cache.insert(wt_idx, info);
+                    app.pr_info_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    app.pr_info_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
 
@@ -160,8 +178,9 @@ fn run_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut 
 
         terminal.draw(|f| render(f, app))?;
 
-        // Use a shorter poll timeout while cloning so the spinner animates smoothly.
-        let poll_timeout = if app.mode == Mode::Cloning {
+        // Use a shorter poll timeout while cloning so the spinner animates smoothly,
+        // or while a PR fetch is in flight so the result appears quickly.
+        let poll_timeout = if app.mode == Mode::Cloning || app.pr_info_rx.is_some() {
             Duration::from_millis(100)
         } else {
             Duration::from_millis(2000)

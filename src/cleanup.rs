@@ -228,14 +228,46 @@ fn current_branch(abs_path: &std::path::Path) -> Result<String> {
 /// Check whether a branch is merged or its PR is closed/merged.
 ///
 /// Strategy:
-/// 1. Try `gh pr view <branch>` — if state is MERGED or CLOSED → true.
-/// 2. Fall back to `git branch --merged master/main` — if branch appears → true.
+/// 1. Try `gh pr list --head <branch> --state merged/closed` — works even after
+///    the remote branch has been deleted (GitHub keeps PR metadata). This is more
+///    reliable than `gh pr view <branch>` which fails when the remote branch is gone.
+/// 2. Fall back to `gh pr view <branch>` — catches the case where the remote branch
+///    still exists and the PR is open/merged.
+/// 3. Fall back to `git merge-base --is-ancestor` — check if the worktree's HEAD
+///    is an ancestor of main/master in the main repo (handles local-only merges).
 fn is_branch_merged_or_closed(
     registry: &Registry,
     wt: &crate::registry::Worktree,
     branch: &str,
 ) -> Result<bool> {
-    // Strategy 1: gh CLI check (most accurate for PR-based workflows).
+    // Strategy 1: gh pr list --head <branch> --state merged/closed.
+    // This works even after the remote branch has been auto-deleted post-merge,
+    // because GitHub retains the PR record and can still filter by head branch name.
+    for state in &["merged", "closed"] {
+        let gh_out = Command::new("gh")
+            .args([
+                "pr", "list",
+                "--head", branch,
+                "--state", state,
+                "--json", "number",
+                "--jq", ".[0].number",
+            ])
+            .current_dir(&wt.abs_path)
+            .output();
+
+        if let Ok(out) = gh_out {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                // Non-empty output means at least one PR matched.
+                if !text.is_empty() && text != "null" {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+
+    // Strategy 2: gh pr view <branch> — handles the case where the remote branch
+    // still exists and the PR state can be queried directly.
     let gh_out = Command::new("gh")
         .args(["pr", "view", branch, "--json", "state", "--jq", ".state"])
         .current_dir(&wt.abs_path)
@@ -254,25 +286,47 @@ fn is_branch_merged_or_closed(
         }
     }
 
-    // Strategy 2: git branch --merged check.
+    // Strategy 3: git merge-base --is-ancestor check.
+    // Check if the worktree's HEAD commit is an ancestor of the default branch
+    // in the main repo. This handles cases where the branch was merged locally
+    // without going through GitHub PRs.
     let project = registry
         .find_project(&wt.project_short)
         .with_context(|| format!("Project '{}' not found", wt.project_short))?;
     let repo_path = registry.base_dir.join(&project.repo);
 
-    for default_branch in &["master", "main"] {
-        let git_out = Command::new("git")
-            .arg("-C")
-            .arg(&repo_path)
-            .args(["branch", "--merged", default_branch])
-            .output();
-        if let Ok(out) = git_out {
-            if out.status.success() {
-                let branches = String::from_utf8_lossy(&out.stdout);
-                for line in branches.lines() {
-                    // `git branch --merged` output has leading "* " or "  " — strip them.
-                    let trimmed = line.trim().trim_start_matches('*').trim();
-                    if trimmed == branch {
+    // Get the worktree's HEAD commit SHA.
+    let head_out = Command::new("git")
+        .arg("-C")
+        .arg(&wt.abs_path)
+        .args(["rev-parse", "HEAD"])
+        .output();
+
+    if let Ok(head) = head_out {
+        if head.status.success() {
+            let head_sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+            for default_branch in &["main", "master"] {
+                // Fetch the latest default branch tip before checking ancestry.
+                let _ = Command::new("git")
+                    .arg("-C")
+                    .arg(&repo_path)
+                    .args(["fetch", "origin", default_branch])
+                    .output();
+
+                let ancestor_out = Command::new("git")
+                    .arg("-C")
+                    .arg(&repo_path)
+                    .args([
+                        "merge-base",
+                        "--is-ancestor",
+                        &head_sha,
+                        &format!("origin/{}", default_branch),
+                    ])
+                    .output();
+
+                if let Ok(out) = ancestor_out {
+                    if out.status.success() {
                         return Ok(true);
                     }
                 }

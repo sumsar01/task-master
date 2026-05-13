@@ -365,6 +365,8 @@ pub enum CloningOp {
     Spawn,
     /// `plan` — refresh phases, refocus TUI window.
     Plan,
+    /// `cleanup-merged` — reload registry, set needs_full_redraw, refresh phases.
+    Cleanup,
 }
 
 impl App {

@@ -143,6 +143,19 @@ fn run_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut 
                                     actions::push_history(app, &entry);
                                 }
                             }
+                            CloningOp::Cleanup => {
+                                match crate::registry::Registry::load(base_dir) {
+                                    Ok(new_reg) => app.reload_from_registry(new_reg),
+                                    Err(e) => {
+                                        app.set_status(format!(
+                                            "Cleanup ran but failed to reload config: {}",
+                                            e
+                                        ));
+                                    }
+                                }
+                                app.needs_full_redraw = true;
+                                app.refresh_phases();
+                            }
                         }
                         app.set_status(msg);
                         app.clone_rx = None;

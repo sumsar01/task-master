@@ -482,8 +482,8 @@ pub fn execute_add_worktree(app: &mut App) -> Result<()> {
 /// removes the entry from `task-master.toml`). The operation is kicked off in
 /// a background thread so the TUI remains animated while git cleans up.
 pub fn execute_remove_worktree(app: &mut App) -> Result<()> {
-    let window_name = match app.selected_worktree() {
-        Some(wt) => wt.window_name.clone(),
+    let (window_name, abs_path) = match app.selected_worktree() {
+        Some(wt) => (wt.window_name.clone(), wt.abs_path.clone()),
         None => return Ok(()),
     };
 
@@ -491,37 +491,41 @@ pub fn execute_remove_worktree(app: &mut App) -> Result<()> {
     let registry = app.registry.clone();
     let label = format!("Removing {}…", window_name);
 
-    // Run a quick synchronous check first: if the worktree has dirty files we
-    // need to surface the ForceConfirm prompt *before* entering Cloning mode,
-    // because the user needs to confirm interactively.
-    match crate::worktree::cmd_remove_worktree(&registry, &base_dir, &window_name, false, false) {
-        Ok(()) => {
-            // Fast path: removal succeeded synchronously (no dirty files check
-            // — worktree remove is usually fast when clean). Use the background
-            // channel pattern so the run_loop handler reloads the registry.
-            let (tx, rx) = std::sync::mpsc::channel();
-            let _ = tx.send(Ok(format!("Removed {}.", window_name)));
-            app.clone_rx = Some(rx);
-            app.cloning_label = label;
-            app.cloning_op = CloningOp::RemoveWorktree;
-            app.mode = Mode::Cloning;
-            app.needs_full_redraw = true;
-        }
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("dirty") || msg.contains("modified or untracked") {
-                app.set_status(format!(
-                    "{} has modified/untracked files. Press Enter to force-remove, Esc to cancel.",
-                    window_name
-                ));
-                app.mode = Mode::ForceConfirmRemoveWorktree;
-            } else {
-                app.mode = Mode::Normal;
-                app.set_status(format!("Remove worktree failed: {}", msg));
-            }
-            app.needs_full_redraw = true;
-        }
+    // Quick synchronous dirty-files check so we can surface the ForceConfirm
+    // prompt *before* entering Cloning mode (the user needs to confirm interactively).
+    let has_changes = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&abs_path)
+        .args(["status", "--porcelain"])
+        .output()
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false);
+
+    if has_changes {
+        app.set_status(format!(
+            "{} has modified/untracked files. Press Enter to force-remove, Esc to cancel.",
+            window_name
+        ));
+        app.mode = Mode::ForceConfirmRemoveWorktree;
+        app.needs_full_redraw = true;
+        return Ok(());
     }
+
+    // No dirty files — kick off the actual removal in a background thread.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = crate::worktree::cmd_remove_worktree(&registry, &base_dir, &window_name, false, false);
+        let msg = result
+            .map(|()| format!("Removed {}.", window_name))
+            .map_err(|e| format!("Remove worktree failed: {}", e));
+        let _ = tx.send(msg);
+    });
+
+    app.clone_rx = Some(rx);
+    app.cloning_label = label;
+    app.cloning_op = CloningOp::RemoveWorktree;
+    app.mode = Mode::Cloning;
+    app.needs_full_redraw = true;
     Ok(())
 }
 
@@ -959,27 +963,21 @@ pub fn execute_spawn_ephemeral(app: &mut App) -> Result<()> {
 /// obtained confirmation).
 pub fn execute_cleanup_merged(app: &mut App) -> Result<()> {
     let base_dir = app.registry.base_dir.clone();
-    match crate::cleanup::cmd_cleanup(&app.registry, &base_dir, true, false, true) {
-        Ok(()) => {
-            match crate::registry::Registry::load(base_dir) {
-                Ok(new_reg) => app.reload_from_registry(new_reg),
-                Err(e) => {
-                    app.set_status(format!("Cleanup ran but failed to reload config: {}", e));
-                    app.mode = Mode::Normal;
-                    app.needs_full_redraw = true;
-                    return Ok(());
-                }
-            }
-            app.mode = Mode::Normal;
-            app.set_status("Cleanup complete — merged ephemeral worktrees removed.");
-            app.needs_full_redraw = true;
-            app.refresh_phases();
-        }
-        Err(e) => {
-            app.mode = Mode::Normal;
-            app.set_status(format!("Cleanup failed: {}", e));
-            app.needs_full_redraw = true;
-        }
-    }
+    let registry = app.registry.clone();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = crate::cleanup::cmd_cleanup(&registry, &base_dir, true, false, true);
+        let msg = result
+            .map(|()| "Cleanup complete — merged ephemeral worktrees removed.".to_string())
+            .map_err(|e| format!("Cleanup failed: {}", e));
+        let _ = tx.send(msg);
+    });
+
+    app.clone_rx = Some(rx);
+    app.cloning_label = "Cleaning up merged worktrees…".to_string();
+    app.cloning_op = CloningOp::Cleanup;
+    app.mode = Mode::Cloning;
+    app.needs_full_redraw = true;
     Ok(())
 }

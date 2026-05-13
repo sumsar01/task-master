@@ -696,13 +696,22 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
             " E2e prompt…  enter PR number  Esc to cancel".to_string(),
             t.text_dim_style(),
         ),
-        Mode::ConfirmCleanup => (String::new(), t.text_dim_style()),
+        Mode::ConfirmCleanup => (
+            " Remove all merged ephemeral worktrees? [y/N]  ·  any other key cancels".to_string(),
+            t.text_style().fg(t.phase_error),
+        ),
         Mode::ForceConfirm => (
             " Press Enter to force-spawn (discards uncommitted changes), Esc to cancel".to_string(),
             t.text_style().fg(t.phase_error),
         ),
-        Mode::ConfirmClose => (String::new(), t.text_dim_style()),
-        Mode::ConfirmRemoveWorktree => (String::new(), t.text_dim_style()),
+        Mode::ConfirmClose => (
+            " Close this worktree window? [y/N]  ·  any other key cancels".to_string(),
+            t.text_style().fg(t.phase_error),
+        ),
+        Mode::ConfirmRemoveWorktree => (
+            " Permanently remove this worktree? [y/N]  ·  any other key cancels".to_string(),
+            t.text_style().fg(t.phase_error),
+        ),
         Mode::ForceConfirmRemoveWorktree => (
             " Press Enter to force-remove (discards uncommitted changes), Esc to cancel"
                 .to_string(),

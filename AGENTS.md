@@ -102,7 +102,7 @@ task-master includes an automated QA agent loop that runs between an agent openi
 ```
 Agent does work on a worktree
   -> window:  WIS-olive:dev
-  -> pushes branch:  git push origin HEAD
+  -> pushes branch:  git push -u origin HEAD
   -> opens PR:  gh pr create --no-push --label wip --title "..." --body "..."
   -> notifies supervisor:  task-master notify <worktree> <pr-number>  (safe, non-blocking)
   -> supervisor wakes within ~2s, spawns QA:  task-master qa <worktree> <pr-number>
@@ -158,13 +158,15 @@ the command can return. Agents use `task-master notify` instead.
 
 ### Rules for agents opening PRs
 
-- Always push the branch explicitly before creating the PR, then use `--no-push`:
+- Always push the branch explicitly (with `-u` to set upstream tracking) before creating the PR, then use `--no-push`:
   ```bash
-  git push origin HEAD
+  git push -u origin HEAD
   gh pr create --no-push --label wip --title "feat: add X" --body "..."
   ```
   `gh pr create` (without `--no-push`) pushes via the GitHub API and bypasses the
   git `post-push` hook entirely — QA will never start automatically if you do that.
+  The `-u` flag sets the upstream tracking branch, which `gh pr create` uses to
+  determine the push remote and infer the base branch.
 - After opening the PR, **always** notify the supervisor:
   ```bash
   task-master notify <worktree> <pr-number>

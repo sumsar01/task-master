@@ -28,8 +28,8 @@ Your worktree has been reset to master. Create a new branch before making any ch
 
 When you are ready to open a PR, you MUST follow these steps in order:
 
-1. Push the branch explicitly:
-   git push origin HEAD
+1. Push the branch explicitly (with -u to set upstream tracking):
+   git push -u origin HEAD
 
 2. Open the PR with --no-push and --label wip:
    gh pr create --no-push --label wip --title \"<title>\" --body \"<body>\"
@@ -68,8 +68,8 @@ You do NOT need to run `git checkout -b` — start committing directly on this b
 
 When you are ready to open a PR, you MUST follow these steps in order:
 
-1. Push the branch explicitly:
-   git push origin HEAD
+1. Push the branch explicitly (with -u to set upstream tracking):
+   git push -u origin HEAD
 
 2. Open the PR with --no-push and --label wip:
    gh pr create --no-push --label wip --title \"<title>\" --body \"<body>\"

@@ -1,5 +1,6 @@
 mod cleanup;
 mod e2e;
+mod gh;
 mod hooks;
 mod notify;
 mod orchestrate;
@@ -188,6 +189,17 @@ enum Commands {
     ///
     /// Safe to run multiple times — it is fully idempotent.
     FixGitIdentity,
+
+    /// Create per-account gh config directories so agents can use the right
+    /// GitHub account without mutating the global ~/.config/gh/hosts.yml.
+    ///
+    /// For each distinct gh_account value in task-master.toml, this command
+    /// creates ~/.config/gh-<account>/ and writes a hosts.yml that sets that
+    /// account as active.  The keyring-backed tokens are shared (not copied),
+    /// so no credentials are duplicated on disk.
+    ///
+    /// Safe to run multiple times — it is fully idempotent.
+    SetupGhAccounts,
 }
 
 fn main() -> Result<()> {
@@ -313,6 +325,8 @@ fn main() -> Result<()> {
                 }
                 Commands::Tui => tui::cmd_tui(&registry),
                 Commands::FixGitIdentity => worktree::cmd_fix_git_identity(&registry, &base_dir)
+                    .map(|msg| println!("{}", msg)),
+                Commands::SetupGhAccounts => gh::cmd_setup_gh_accounts(&registry)
                     .map(|msg| println!("{}", msg)),
                 Commands::AddProject { .. } => unreachable!(),
             }

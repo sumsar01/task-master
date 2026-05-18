@@ -284,10 +284,10 @@ pub fn cmd_qa(registry: &Registry, worktree_name: &str, pr_number: Option<u64>) 
         // Transition: WIS-olive:dev -> WIS-olive:qa (or overwrite any existing phase)
         tmux::set_window_phase(&session, &base_name, Some("qa"))?;
         // Replace whatever is running with a fresh opencode TUI running the QA prompt.
-        tmux::replace_window_process(&session, &base_name, &abs_path_str, &prompt, None)?;
+        tmux::replace_window_process(&session, &base_name, &abs_path_str, &prompt, None, None)?;
     } else {
         // No window yet — create it directly in :qa phase.
-        tmux::spawn_window(&session, &base_name, &abs_path_str, &prompt, Some("qa"))?;
+        tmux::spawn_window(&session, &base_name, &abs_path_str, &prompt, Some("qa"), None)?;
     }
 
     Ok(format!(

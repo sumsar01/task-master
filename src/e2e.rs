@@ -179,7 +179,7 @@ pub fn cmd_e2e(registry: &Registry, worktree_name: &str, pr_number: u64) -> Resu
     tmux::set_window_phase(&session, &base_name, Some("e2e"))?;
 
     // Replace whatever is running with a fresh opencode TUI running the e2e prompt.
-    tmux::replace_window_process(&session, &base_name, &abs_path_str, &prompt, None)?;
+    tmux::replace_window_process(&session, &base_name, &abs_path_str, &prompt, None, None)?;
 
     println!(
         "E2e agent started for '{}' (PR #{}) — window is now '{}:e2e'.",

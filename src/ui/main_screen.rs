@@ -219,11 +219,13 @@ fn render_worktree_list(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) {
             };
 
             match entry {
-                ListEntry::OrchestratorRow { phase } => {
+                ListEntry::OrchestratorRow { window_name, phase, .. } => {
                     let phase_color = t.phase_color(phase);
+                    // Show a short label derived from the window name (strip "orchestrate-" prefix).
+                    let label = window_name.strip_prefix("orchestrate-").unwrap_or(window_name.as_str());
                     let line = Line::from(vec![
                         Span::styled(
-                            " ⬡ orchestrate  ",
+                            format!(" ⬡ {:16}  ", label),
                             base.fg(t.text_accent).add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(format!("[{}]", phase), base.fg(phase_color)),

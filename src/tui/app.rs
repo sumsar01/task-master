@@ -1,5 +1,4 @@
 use crate::registry::{write_collapsed, write_context_collapsed, write_group_collapsed, ProjectConfig, Registry, Worktree};
-use crate::orchestrate::ORCHESTRATE_WINDOW;
 use crate::stats::{fetch_stats, StatsRow};
 use crate::status::find_live_phase;
 use crate::tmux;
@@ -102,6 +101,12 @@ pub enum ListEntry {
     /// The orchestrator status row shown at the top of the list when the
     /// orchestrate tmux window exists.  Read-only / informational.
     OrchestratorRow {
+        /// The tmux window base name, e.g. "orchestrate-implement-oauth".
+        window_name: String,
+        /// The group this orchestrator belongs to (inferred at spawn time from
+        /// the selected row's group), e.g. "Work" or "Personal".
+        #[allow(dead_code)]
+        group: Option<String>,
         /// Current phase of the orchestrate window, e.g. "active", "done", "blocked".
         phase: String,
     },
@@ -141,6 +146,17 @@ pub enum ListEntry {
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
+
+/// A single active orchestrator window detected in the tmux session.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrchestratorEntry {
+    /// Tmux window base name, e.g. "orchestrate-implement-oauth".
+    pub window_name: String,
+    /// Group the orchestrator was spawned for, e.g. "Work".
+    pub group: Option<String>,
+    /// Current phase suffix, e.g. "active", "done", "blocked".
+    pub phase: String,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActionKind {
@@ -232,9 +248,9 @@ pub struct App {
     /// Transient status message and when it was set.
     pub status_msg: Option<(String, Instant)>,
     pub session: String,
-    /// Current phase of the orchestrate tmux window, if it exists.
-    /// `None` means no `orchestrate` window is present in the session.
-    pub orchestrator_phase: Option<String>,
+    /// All currently active orchestrator windows detected in the tmux session.
+    /// Each entry corresponds to one `orchestrate-<label>` window.
+    pub orchestrators: Vec<OrchestratorEntry>,
     /// The stable tmux window ID (e.g. `@3`) for the window running the TUI.
     ///
     /// This ID is assigned once at window creation and never changes, even when
@@ -423,7 +439,7 @@ impl App {
             stats_cache: HashMap::new(),
             status_msg: None,
             session,
-            orchestrator_phase: None,
+            orchestrators: Vec::new(),
             tui_window_id,
             should_quit: false,
             last_stats_idx: None,
@@ -667,9 +683,35 @@ impl App {
         let current_wt_idx = self.selected_worktree_idx();
         let mut entries = Self::build_entries(&self.projects, &self.worktrees, &self.group_collapsed, &self.context_collapsed);
 
-        // Prepend the orchestrator row when the orchestrate window exists.
-        if let Some(ref phase) = self.orchestrator_phase {
-            entries.insert(0, ListEntry::OrchestratorRow { phase: phase.clone() });
+        // Insert orchestrator rows inside their respective groups.
+        // For each orchestrator, find the GroupHeader that matches its group and
+        // insert the row immediately after it.  Orchestrators without a group
+        // (or whose group has no header in the list) are prepended at the top.
+        let orchestrators = self.orchestrators.clone();
+        let mut ungrouped: Vec<ListEntry> = Vec::new();
+        for orch in &orchestrators {
+            let row = ListEntry::OrchestratorRow {
+                window_name: orch.window_name.clone(),
+                group: orch.group.clone(),
+                phase: orch.phase.clone(),
+            };
+            if let Some(ref group_name) = orch.group {
+                // Find the GroupHeader position and insert just after it.
+                let pos = entries.iter().position(|e| {
+                    matches!(e, ListEntry::GroupHeader { name, .. } if name == group_name)
+                });
+                if let Some(idx) = pos {
+                    entries.insert(idx + 1, row);
+                } else {
+                    ungrouped.push(row);
+                }
+            } else {
+                ungrouped.push(row);
+            }
+        }
+        // Prepend ungrouped orchestrators at the top.
+        for (i, row) in ungrouped.into_iter().enumerate() {
+            entries.insert(i, row);
         }
 
         self.entries = entries;
@@ -795,12 +837,23 @@ impl App {
             .and_then(|i| self.worktrees.get(i))
     }
 
-    /// Returns true when the currently selected entry is the orchestrator row.
-    pub fn selected_is_orchestrator(&self) -> bool {
+    /// Returns the window name of the currently selected orchestrator row,
+    /// or `None` if the selection is not an orchestrator row.
+    pub fn selected_orchestrator_window(&self) -> Option<String> {
         self.selected()
             .and_then(|i| self.entries.get(i))
-            .map(|e| matches!(e, ListEntry::OrchestratorRow { .. }))
-            .unwrap_or(false)
+            .and_then(|e| {
+                if let ListEntry::OrchestratorRow { window_name, .. } = e {
+                    Some(window_name.clone())
+                } else {
+                    None
+                }
+            })
+    }
+
+    /// Returns true when the currently selected entry is an orchestrator row.
+    pub fn selected_is_orchestrator(&self) -> bool {
+        self.selected_orchestrator_window().is_some()
     }
 
     pub fn selected_phase(&self) -> &str {
@@ -876,8 +929,16 @@ impl App {
                 .unwrap_or_else(|| "idle".to_string());
             self.phases[i] = phase;
         }
-        // Refresh the orchestrator window phase.
-        self.orchestrator_phase = find_live_phase(&self.session, ORCHESTRATE_WINDOW);
+        // Refresh orchestrator windows by scanning all orchestrate-* windows.
+        let live = crate::orchestrate::list_live_orchestrators(&self.session);
+        // Preserve group association from existing entries where known.
+        self.orchestrators = live.into_iter().map(|(window_name, phase)| {
+            // Reuse existing group info if the window was already tracked.
+            let group = self.orchestrators.iter()
+                .find(|o| o.window_name == window_name)
+                .and_then(|o| o.group.clone());
+            OrchestratorEntry { window_name, group, phase }
+        }).collect();
         // Rebuild entries so the OrchestratorRow appears/disappears as needed.
         self.rebuild_entries();
         if self.show_preview {
@@ -896,8 +957,8 @@ impl App {
     /// scroll offset is preserved so they can keep reading history.
     pub fn refresh_preview(&mut self) {
         // Orchestrator row: capture the orchestrate tmux window.
-        if self.selected_is_orchestrator() {
-            let lines = tmux::capture_pane(&self.session, crate::orchestrate::ORCHESTRATE_WINDOW)
+        if let Some(window_name) = self.selected_orchestrator_window() {
+            let lines = tmux::capture_pane(&self.session, &window_name)
                 .unwrap_or_default();
             self.preview_lines = lines;
             self.last_preview_idx = None;
@@ -941,10 +1002,14 @@ impl App {
     /// The result arrives in `pr_info_rx` and is polled by the run_loop.
     pub fn refresh_detail(&mut self) {
         // Orchestrator row: show phase info instead of git detail.
-        if self.selected_is_orchestrator() {
+        if let Some(window_name) = self.selected_orchestrator_window() {
             self.detail_lines.clear();
-            let phase = self.orchestrator_phase.clone().unwrap_or_else(|| "unknown".to_string());
-            self.detail_lines.push(format!("Window:  orchestrate"));
+            let phase = self.orchestrators.iter()
+                .find(|o| o.window_name == window_name)
+                .map(|o| o.phase.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            self.detail_lines.push(format!("Window:  {}", window_name));
             self.detail_lines.push(format!("Phase:   {}", phase));
             self.detail_lines.push(String::new());
             self.detail_lines.push("Press 'a' to attach to the orchestrator window.".to_string());
@@ -1323,6 +1388,19 @@ impl App {
             }
             _ => None,
         }
+    }
+
+    /// Return the group name of the currently selected entry, if any.
+    /// Used to associate a new orchestrator with the right group.
+    pub fn selected_group(&self) -> Option<String> {
+        let idx = self.selected()?;
+        // Walk backwards from the selected entry to find the nearest GroupHeader.
+        for e in self.entries[..=idx].iter().rev() {
+            if let ListEntry::GroupHeader { name, .. } = e {
+                return Some(name.clone());
+            }
+        }
+        None
     }
 }
 

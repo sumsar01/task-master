@@ -317,11 +317,11 @@ fn handle_normal(app: &mut App, code: KeyCode) -> Result<()> {
         }
         KeyCode::Char('a') if !is_burst => {
             // Orchestrator row: attach directly to the orchestrate window.
-            if app.selected_is_orchestrator() {
+            if let Some(window_name) = app.selected_orchestrator_window() {
                 super::actions::attach_to_window(
                     &app.session,
-                    crate::orchestrate::ORCHESTRATE_WINDOW,
-                    crate::orchestrate::ORCHESTRATE_WINDOW,
+                    &window_name,
+                    &window_name,
                 );
                 return Ok(());
             }

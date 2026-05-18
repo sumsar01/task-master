@@ -162,6 +162,8 @@ pub enum ActionKind {
     /// User typed a PR number; Enter calls execute_e2e which spawns the e2e
     /// validation agent for the selected worktree.
     E2e,
+    /// User typed a cross-repo task description; Enter calls cmd_orchestrate.
+    Orchestrate,
 }
 
 /// Tracks which input step the add-project flow is on.

@@ -28,15 +28,32 @@ cat AGENTS.md 2>/dev/null || echo "(no AGENTS.md found)"
 
 ENVIRONMENT ASSUMPTIONS
 
-You are running in a terminal that is already:
-- Authenticated to the cloud provider (credentials are pre-configured)
+You are running in a terminal that is:
 - Pointed at the correct cluster/environment context for staging
-Do NOT attempt to configure credentials or switch contexts. Confirm identity first
-using whatever tooling the project uses (e.g. `aws sts get-caller-identity`,
-`kubectl config current-context`, `gcloud config list`, etc.).
 
-If authentication commands fail, stop immediately and report the error — do not
-proceed with validation if you are not authenticated.
+Before proceeding, confirm AWS identity:
+
+```bash
+aws sts get-caller-identity
+```
+
+If the command fails (credentials missing or expired), log in using:
+
+```bash
+hatch aws signin developer-edit
+```
+
+Then re-run `aws sts get-caller-identity` to confirm. If credentials are still
+unavailable after the signin attempt, stop immediately and report the error — do
+not proceed with validation if you are not authenticated.
+
+Also confirm the cluster context:
+
+```bash
+kubectl config current-context
+```
+
+Do not switch cluster contexts — work with what is already configured.
 
 DEPLOYMENT READINESS CHECK
 
@@ -146,6 +163,6 @@ IMPORTANT RULES
 - Keep commit messages prefixed with 'e2e:'.
 - Do not modify infrastructure that requires IaC apply (Terraform, CDK, etc.) — flag it for humans.
 - Do not approve or merge the PR.
-- Do not switch cloud credentials or cluster contexts — work with what is already configured.
+- Do not switch cluster contexts — work with what is already configured. You may run `hatch aws signin developer-edit` to refresh AWS credentials if they are missing or expired.
 - If credential/permission commands return errors, report them and stop.
 - gh CLI is available for GitHub interactions.

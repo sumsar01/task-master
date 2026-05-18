@@ -341,6 +341,7 @@ fn render_actions(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
     lines.push(Line::from(""));
     lines.push(action_line('P', "add project", true, false, t));
     lines.push(action_line('v', "supervise", true, false, t));
+    lines.push(action_line('O', "orchestrate", true, false, t));
     lines.push(Line::from(""));
 
     // Separator

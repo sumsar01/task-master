@@ -1,3 +1,4 @@
+use crate::orchestrate::ORCHESTRATE_WINDOW;
 use crate::registry::Registry;
 use crate::tmux;
 use anyhow::Result;
@@ -45,6 +46,11 @@ pub fn cmd_status(registry: &Registry) -> Result<()> {
         return Ok(());
     }
 
+    // Also check for an active orchestrator window.
+    let orchestrator_row: Option<String> = session_opt
+        .as_deref()
+        .and_then(|s| find_live_phase(s, ORCHESTRATE_WINDOW));
+
     // Calculate column widths.
     let w_name = rows
         .iter()
@@ -79,6 +85,18 @@ pub fn cmd_status(registry: &Registry) -> Result<()> {
             name,
             phase,
             path,
+            w_name = w_name,
+            w_phase = w_phase,
+        );
+    }
+
+    // Print orchestrator status below the worktree table if present.
+    if let Some(orch_phase) = orchestrator_row {
+        println!();
+        println!(
+            "{:<w_name$}  {:<w_phase$}  (orchestrator)",
+            "[orchestrate]",
+            orch_phase,
             w_name = w_name,
             w_phase = w_phase,
         );

@@ -71,6 +71,17 @@ pub struct ProjectConfig {
     /// The value should be the path to the **private** key file (e.g. `~/.ssh/id_rsa`).
     #[serde(default)]
     pub git_signing_key: Option<String>,
+    /// Optional GitHub account name to use when running `gh` commands in this
+    /// project's worktrees (e.g. "skrwhiteaway", "sumsar01").
+    ///
+    /// When set, `task-master` will set `GH_CONFIG_DIR=~/.config/gh-<account>`
+    /// before launching opencode in this project's worktrees, isolating the gh
+    /// account without mutating the global `~/.config/gh/hosts.yml`.
+    ///
+    /// Run `task-master setup-gh-accounts` once to create the per-account config
+    /// directories from your existing `gh auth` setup.
+    #[serde(default)]
+    pub gh_account: Option<String>,
     /// Optional word prefix for auto-generated ephemeral worktree names.
     /// E.g. "spruce" produces names like "spruce-7f3a".
     /// When absent, a random word is chosen from the built-in adjective list.

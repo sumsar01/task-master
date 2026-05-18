@@ -26,12 +26,12 @@ pub fn format_registry_snapshot(registry: &Registry) -> String {
 
     let mut lines = Vec::new();
     lines.push(format!(
-        "{:<30}  {:<6}  {:<22}  {}",
-        "PROJECT", "SHORT", "WORKTREE", "PHASE"
+        "{:<30}  {:<6}  {:<22}  {:<12}  {}",
+        "PROJECT", "SHORT", "WORKTREE", "GH_ACCOUNT", "PHASE"
     ));
     lines.push(format!(
-        "{:-<30}  {:-<6}  {:-<22}  {:-<7}",
-        "", "", "", ""
+        "{:-<30}  {:-<6}  {:-<22}  {:-<12}  {:-<7}",
+        "", "", "", "", ""
     ));
 
     for project in &registry.projects {
@@ -41,10 +41,12 @@ pub fn format_registry_snapshot(registry: &Registry) -> String {
             .filter(|w| w.project_short == project.short)
             .collect();
 
+        let gh_account_col = project.gh_account.as_deref().unwrap_or("");
+
         if worktrees.is_empty() {
             lines.push(format!(
-                "{:<30}  {:<6}  {:<22}  {}",
-                project.name, project.short, "(no worktrees)", ""
+                "{:<30}  {:<6}  {:<22}  {:<12}  {}",
+                project.name, project.short, "(no worktrees)", gh_account_col, ""
             ));
             continue;
         }
@@ -57,9 +59,10 @@ pub fn format_registry_snapshot(registry: &Registry) -> String {
             };
             let project_col = if i == 0 { project.name.as_str() } else { "" };
             let short_col = if i == 0 { project.short.as_str() } else { "" };
+            let account_col = if i == 0 { gh_account_col } else { "" };
             lines.push(format!(
-                "{:<30}  {:<6}  {:<22}  {}",
-                project_col, short_col, wt.window_name, phase
+                "{:<30}  {:<6}  {:<22}  {:<12}  {}",
+                project_col, short_col, wt.window_name, account_col, phase
             ));
         }
     }
@@ -125,16 +128,13 @@ PHASE 3 — Delegate sub-tasks to agents\n\
 \n\
 For each sub-task (in dependency order — unblocked ones first):\n\
 \n\
-1. Check the current state snapshot above for an idle worktree in the target project.\n\
-2. If an idle worktree exists, use it:\n\
-   ```bash\n\
-   task-master spawn <WINDOW-NAME> \"<sub-task prompt>\"\n\
-   ```\n\
-3. If ALL worktrees for that project are occupied, spawn an ephemeral one:\n\
+1. Always spawn an ephemeral worktree for each sub-task:\n\
    ```bash\n\
    task-master spawn --ephemeral <SHORT> \"<sub-task prompt>\"\n\
    ```\n\
-4. Mark the beads issue as claimed:\n\
+   Ephemeral worktrees are automatically cleaned up after their branch is merged,\n\
+   keeping the workspace tidy without manual intervention.\n\
+2. Mark the beads issue as claimed:\n\
    ```bash\n\
    bd update <id> --claim\n\
    ```\n\
@@ -142,6 +142,10 @@ For each sub-task (in dependency order — unblocked ones first):\n\
 The sub-task prompt you write should be a self-contained task description that the agent \n\
 can act on immediately. Include the project context, what to implement, and any cross-repo \n\
 coordination the agent should be aware of (e.g. 'Service B expects endpoint X from Service A').\n\
+\n\
+Note: the GH_CONFIG_DIR environment variable is automatically set for each spawned agent\n\
+based on the gh_account configured for the project in task-master.toml. Agents do not need\n\
+to run `gh auth switch` manually.\n\
 \n\
 PHASE 4 — Monitor and coordinate\n\
 \n\
@@ -181,7 +185,8 @@ IMPORTANT RULES\n\
 - Do NOT modify any source files, write code, or open PRs yourself.\n\
 - Do NOT use `task-master qa` directly — sub-agents do that via `task-master notify`.\n\
 - Use `bd` for ALL task tracking. Do not use markdown todo lists.\n\
-- Prefer idle worktrees over ephemeral ones to avoid unnecessary cleanup.\n\
+- Always use `task-master spawn --ephemeral <SHORT>` — never spawn into named worktrees.\n\
+- Ephemeral worktrees are cleaned up automatically after their branch is merged.\n\
 - If the task only involves one project, you are still the right tool — delegate to that project.\n\
 - If you are unsure which project owns something, err toward creating an issue and letting the\n\
   sub-agent figure it out from the codebase.\n\
@@ -236,6 +241,7 @@ pub fn cmd_orchestrate(registry: &Registry, task: &str) -> Result<String> {
             &working_dir,
             &prompt,
             Some("orchestrate"),
+            None,
         )?;
         format!(
             "Replaced existing '{}' window with fresh orchestrator session (now '{}:active').",
@@ -243,7 +249,7 @@ pub fn cmd_orchestrate(registry: &Registry, task: &str) -> Result<String> {
         )
     } else {
         // spawn_window creates "orchestrate:dev"; we immediately rename it to "orchestrate:active".
-        tmux::spawn_window(&session, ORCHESTRATE_WINDOW, &working_dir, &prompt, Some("orchestrate"))?;
+        tmux::spawn_window(&session, ORCHESTRATE_WINDOW, &working_dir, &prompt, Some("orchestrate"), None)?;
         tmux::set_window_phase(&session, ORCHESTRATE_WINDOW, Some("active"))?;
         format!(
             "Spawned orchestrator in new window '{}:active'.",

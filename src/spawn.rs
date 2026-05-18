@@ -109,6 +109,12 @@ pub fn cmd_spawn(
     let prompt_owned = build_spawn_prompt(window_name, prompt);
     let prompt = prompt_owned.as_str();
 
+    // Resolve the gh_account for this project (used to set GH_CONFIG_DIR).
+    let gh_account: Option<String> = registry
+        .find_project(&worktree.project_short)
+        .and_then(|p| p.gh_account.clone());
+    let gh_account_ref = gh_account.as_deref();
+
     info!(
         "[{}] Spawning in session '{}', dir {}",
         window_name, session, abs_path_str
@@ -118,14 +124,14 @@ pub fn cmd_spawn(
 
     let is_new = if tmux::find_window_index(&session, base_name).is_none() {
         // No window yet — create it fresh.
-        tmux::spawn_window(&session, window_name, &abs_path_str, prompt, None)?;
+        tmux::spawn_window(&session, window_name, &abs_path_str, prompt, None, gh_account_ref)?;
         true
     } else {
         // Window already exists (possibly in :plan, :qa, :review, or :dev phase).
         // Always replace the running process with a fresh opencode dev session so
         // we don't accidentally send prompts into a plan/qa agent's chat input.
         tmux::set_window_phase(&session, base_name, Some("dev"))?;
-        tmux::replace_window_process(&session, base_name, &abs_path_str, prompt, None)?;
+        tmux::replace_window_process(&session, base_name, &abs_path_str, prompt, None, gh_account_ref)?;
         false
     };
 
@@ -222,12 +228,14 @@ pub fn cmd_spawn_ephemeral(
     let base_name = tmux::base_window_name(&resolved_window_name);
 
     // Ephemeral worktrees always get a fresh window — no pre-existing window expected.
+    let gh_account = project.gh_account.as_deref();
     tmux::spawn_window(
         &session,
         &resolved_window_name,
         &abs_path_str,
         &full_prompt,
         None,
+        gh_account,
     )?;
     tmux::set_window_phase(&session, base_name, Some("dev"))?;
 

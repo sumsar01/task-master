@@ -147,6 +147,7 @@ pub fn replace_window_process(
     working_dir: &str,
     prompt: &str,
     agent: Option<&str>,
+    gh_account: Option<&str>,
 ) -> Result<()> {
     let idx = find_window_index(session, base_name).with_context(|| {
         format!(
@@ -157,7 +158,7 @@ pub fn replace_window_process(
     let target = format!("{}:{}", session, idx);
 
     let prompt_file = write_prompt_file(prompt)?;
-    let opencode_cmd = build_opencode_cmd(&prompt_file, agent);
+    let opencode_cmd = build_opencode_cmd(&prompt_file, agent, gh_account);
     let cmd = format!("cd {} && {}", shell_escape(working_dir), opencode_cmd);
 
     // respawn-pane -k atomically kills the running process and starts the new
@@ -263,6 +264,7 @@ pub fn spawn_window(
     working_dir: &str,
     prompt: &str,
     agent: Option<&str>,
+    gh_account: Option<&str>,
 ) -> Result<bool> {
     // Write the prompt to a temp file so we don't send a huge/multi-line string
     // through tmux send-keys (which would mangle it or fire premature Enters).
@@ -280,7 +282,7 @@ pub fn spawn_window(
 
     // New window — always created with the :dev phase suffix.
     let initial_name = format!("{}:dev", window_name);
-    let opencode_cmd = build_opencode_cmd(&prompt_file, agent);
+    let opencode_cmd = build_opencode_cmd(&prompt_file, agent, gh_account);
 
     // Pass the command directly to new-window so tmux runs it via /bin/sh
     // immediately — no send-keys ZLE timing races, no startup sleep needed.
@@ -338,11 +340,23 @@ fn write_prompt_file(prompt: &str) -> Result<String> {
 /// which can mangle them or trigger premature Enter presses on embedded newlines.
 ///
 /// The command uses `"$(cat <file>)"` so the shell reads the prompt at startup.
-fn build_opencode_cmd(prompt_file: &str, agent: Option<&str>) -> String {
+///
+/// When `gh_account` is set, `GH_CONFIG_DIR=~/.config/gh-<account>` is prepended
+/// so the launched opencode session uses the correct GitHub identity without
+/// mutating the global `~/.config/gh/hosts.yml`.
+fn build_opencode_cmd(prompt_file: &str, agent: Option<&str>, gh_account: Option<&str>) -> String {
     // Prepend GIT_TERMINAL_PROMPT=0 so that any subprocess (e.g. uvx fetching
     // the Serena MCP server from GitHub) never falls back to an interactive
     // password prompt on /dev/tty, which would block the agent TUI.
-    let mut cmd = String::from("GIT_TERMINAL_PROMPT=0 opencode");
+    let mut env_prefix = String::from("GIT_TERMINAL_PROMPT=0");
+    if let Some(account) = gh_account {
+        let config_dir = crate::gh::gh_config_dir_for(account);
+        env_prefix.push_str(&format!(
+            " GH_CONFIG_DIR={}",
+            shell_escape(&config_dir.to_string_lossy())
+        ));
+    }
+    let mut cmd = format!("{} opencode", env_prefix);
     if let Some(a) = agent {
         cmd.push_str(&format!(" --agent {}", shell_escape(a)));
     }
@@ -653,7 +667,7 @@ mod tests {
     #[test]
     fn test_build_opencode_cmd_no_agent() {
         // build_opencode_cmd now takes a prompt *file path*, not the raw prompt.
-        let cmd = build_opencode_cmd("/tmp/task-master-prompt-1.txt", None);
+        let cmd = build_opencode_cmd("/tmp/task-master-prompt-1.txt", None, None);
         // Must suppress interactive git prompts from subprocesses (e.g. uvx/serena MCP).
         assert!(
             cmd.starts_with("GIT_TERMINAL_PROMPT=0 opencode"),
@@ -668,7 +682,7 @@ mod tests {
 
     #[test]
     fn test_build_opencode_cmd_with_agent() {
-        let cmd = build_opencode_cmd("/tmp/task-master-prompt-2.txt", Some("plan"));
+        let cmd = build_opencode_cmd("/tmp/task-master-prompt-2.txt", Some("plan"), None);
         assert!(
             cmd.starts_with("GIT_TERMINAL_PROMPT=0 opencode"),
             "got: {cmd}"
@@ -686,7 +700,7 @@ mod tests {
 
     #[test]
     fn test_build_opencode_cmd_with_build_agent() {
-        let cmd = build_opencode_cmd("/tmp/task-master-prompt-3.txt", Some("build"));
+        let cmd = build_opencode_cmd("/tmp/task-master-prompt-3.txt", Some("build"), None);
         assert!(
             cmd.starts_with("GIT_TERMINAL_PROMPT=0 opencode"),
             "got: {cmd}"
@@ -703,7 +717,7 @@ mod tests {
             ("/tmp/p2.txt", Some("plan")),
             ("/tmp/p3.txt", Some("qa")),
         ] {
-            let cmd = build_opencode_cmd(file, agent);
+            let cmd = build_opencode_cmd(file, agent, None);
             assert!(
                 cmd.starts_with("GIT_TERMINAL_PROMPT=0 opencode"),
                 "Missing GIT_TERMINAL_PROMPT=0 for agent={agent:?}: got: {cmd}"

@@ -142,7 +142,7 @@ pub fn cmd_plan(registry: &Registry, worktree_name: &str, task: &str) -> Result<
         // Rename first so the window reflects :plan before we kill+replace.
         tmux::set_window_phase(&session, &base_name, Some("plan"))?;
         // replace_window_process sends the prompt exactly once (after C-c).
-        tmux::replace_window_process(&session, &base_name, &abs_path_str, &prompt, Some("plan"))?;
+        tmux::replace_window_process(&session, &base_name, &abs_path_str, &prompt, Some("plan"), None)?;
         format!(
             "Planning agent started in existing window '{}:plan'.",
             base_name
@@ -150,7 +150,7 @@ pub fn cmd_plan(registry: &Registry, worktree_name: &str, task: &str) -> Result<
     } else {
         // spawn_window creates the window (named :dev) and sends the opencode
         // command exactly once.
-        tmux::spawn_window(&session, &base_name, &abs_path_str, &prompt, Some("plan"))?;
+        tmux::spawn_window(&session, &base_name, &abs_path_str, &prompt, Some("plan"), None)?;
         // Immediately rename :dev -> :plan.
         tmux::set_window_phase(&session, &base_name, Some("plan"))?;
         format!("Planning agent started in new window '{}:plan'.", base_name)

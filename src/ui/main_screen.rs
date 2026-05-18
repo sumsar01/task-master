@@ -707,6 +707,10 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
             " E2e prompt…  enter PR number  Esc to cancel".to_string(),
             t.text_dim_style(),
         ),
+        Mode::Prompt(crate::tui::ActionKind::Orchestrate) => (
+            " Orchestrate…  type cross-repo task  Esc to cancel".to_string(),
+            t.text_dim_style(),
+        ),
         Mode::ConfirmCleanup => (
             " Remove all merged ephemeral worktrees? [y/N]  ·  any other key cancels".to_string(),
             t.text_style().fg(t.phase_error),

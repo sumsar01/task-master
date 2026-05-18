@@ -337,6 +337,13 @@ fn handle_normal(app: &mut App, code: KeyCode) -> Result<()> {
             }
             Err(e) => app.set_status(format!("Supervise failed: {}", e)),
         },
+        // ── Orchestrate (cross-repo) ──────────────────────────────────────────
+        KeyCode::Char('O') if !is_burst => {
+            app.input_buf.clear();
+            app.cursor_pos = 0;
+            app.set_status("Type cross-repo task and press Enter to start orchestrator (Esc to cancel).");
+            app.mode = Mode::Prompt(ActionKind::Orchestrate);
+        }
         KeyCode::Char('c') if !is_burst => {
             if !app.require_worktree_selected() {
                 return Ok(());

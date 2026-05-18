@@ -55,6 +55,7 @@ pub fn execute_action(app: &mut App, kind: &ActionKind, force: bool) -> Result<(
         ActionKind::AddProject => execute_add_project(app),
         ActionKind::SpawnEphemeral => execute_spawn_ephemeral(app),
         ActionKind::E2e => execute_e2e(app),
+        ActionKind::Orchestrate => execute_orchestrate(app),
     }
 }
 
@@ -979,5 +980,28 @@ pub fn execute_cleanup_merged(app: &mut App) -> Result<()> {
     app.cloning_op = CloningOp::Cleanup;
     app.mode = Mode::Cloning;
     app.needs_full_redraw = true;
+    Ok(())
+}
+
+pub fn execute_orchestrate(app: &mut App) -> Result<()> {
+    let task = app.input_buf.trim().to_string();
+    if task.is_empty() {
+        app.set_status("Task description cannot be empty.");
+        return Ok(());
+    }
+
+    push_history(app, &task);
+    app.reset_input();
+
+    match crate::orchestrate::cmd_orchestrate(&app.registry, &task) {
+        Ok(_msg) => {
+            let _ = crate::tmux::select_window_by_id(&app.session, &app.tui_window_id);
+            app.set_status("Orchestrator started in 'orchestrate' window.".to_string());
+            app.refresh_phases();
+            app.needs_full_redraw = true;
+        }
+        Err(e) => app.set_status(format!("Orchestrate failed: {}", e)),
+    }
+    app.mode = Mode::Normal;
     Ok(())
 }

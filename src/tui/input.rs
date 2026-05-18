@@ -261,6 +261,13 @@ fn handle_normal(app: &mut App, code: KeyCode) -> Result<()> {
             app.mode = Mode::Prompt(ActionKind::E2e);
         }
         KeyCode::Char('m') if !is_burst => {
+            if app.selected_is_orchestrator() {
+                app.input_buf.clear();
+                app.cursor_pos = 0;
+                app.set_status("Type message and press Enter to send to orchestrator (Esc to cancel).");
+                app.mode = Mode::Prompt(ActionKind::Send);
+                return Ok(());
+            }
             if !app.require_worktree_selected() {
                 return Ok(());
             }
@@ -354,6 +361,10 @@ fn handle_normal(app: &mut App, code: KeyCode) -> Result<()> {
             app.mode = Mode::Prompt(ActionKind::Orchestrate);
         }
         KeyCode::Char('c') if !is_burst => {
+            if app.selected_is_orchestrator() {
+                app.mode = Mode::ConfirmClose;
+                return Ok(());
+            }
             if !app.require_worktree_selected() {
                 return Ok(());
             }

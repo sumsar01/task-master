@@ -763,6 +763,9 @@ fn render_context_hints(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
         }
         Some(idx) => match app.entries.get(idx) {
             Some(ListEntry::OrchestratorRow { .. }) => &[
+                ("a", "attach"),
+                ("m", "message"),
+                ("c", "close"),
                 ("O", "orchestrate"),
                 ("?", "help"),
                 ("q", "quit"),

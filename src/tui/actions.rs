@@ -284,20 +284,19 @@ pub fn execute_e2e(app: &mut App) -> Result<()> {
 }
 
 pub fn execute_close(app: &mut App) -> Result<()> {
-    let wt_name = match app.selected_worktree() {
-        Some(wt) => wt.window_name.clone(),
-        None => return Ok(()),
+    let wt_name = if app.selected_is_orchestrator() {
+        crate::orchestrate::ORCHESTRATE_WINDOW.to_string()
+    } else {
+        match app.selected_worktree() {
+            Some(wt) => wt.window_name.clone(),
+            None => return Ok(()),
+        }
     };
     match crate::cmd_close(&app.session, &wt_name) {
         Ok(()) => {
-            // Reclaim focus after the kill-window call. Killing a tmux window
-            // can briefly steal focus away from the TUI window.
             refocus_tui_window(&app.session, &app.tui_window_id);
-
             app.mode = Mode::Normal;
             app.set_status(format!("Closed {}.", wt_name));
-            // Force a full repaint so the confirm-close modal cells and any
-            // other stale areas are cleared on the next frame.
             app.needs_full_redraw = true;
             app.refresh_phases();
         }
@@ -310,19 +309,26 @@ pub fn execute_close(app: &mut App) -> Result<()> {
 }
 
 pub fn execute_send(app: &mut App) -> Result<()> {
-    let wt_name = match app.selected_worktree() {
-        Some(wt) => wt.window_name.clone(),
-        None => return Ok(()),
-    };
     let prompt = app.input_buf.trim().to_string();
     if prompt.is_empty() {
         app.set_status("Message is empty — type something first.");
         return Ok(());
     }
-    match crate::cmd_send(&app.registry, &wt_name, &prompt) {
+
+    let window_name = if app.selected_is_orchestrator() {
+        crate::orchestrate::ORCHESTRATE_WINDOW.to_string()
+    } else {
+        match app.selected_worktree() {
+            Some(wt) => wt.window_name.clone(),
+            None => return Ok(()),
+        }
+    };
+
+    let result = tmux::send_to_window(&app.session, &window_name, &prompt);
+    match result {
         Ok(()) => {
             let _ = tmux::select_window_by_id(&app.session, &app.tui_window_id);
-            app.set_status(format!("Sent message to {}.", wt_name));
+            app.set_status(format!("Sent message to {}.", window_name));
             push_history(app, &prompt);
             app.reset_input();
             app.refresh_phases();

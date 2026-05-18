@@ -1,4 +1,5 @@
 use crate::registry::{write_collapsed, write_context_collapsed, write_group_collapsed, ProjectConfig, Registry, Worktree};
+use crate::orchestrate::ORCHESTRATE_WINDOW;
 use crate::stats::{fetch_stats, StatsRow};
 use crate::status::find_live_phase;
 use crate::tmux;
@@ -98,6 +99,12 @@ pub fn fetch_pr_info(path: &str) -> Option<PrInfo> {
 /// A single visual row in the worktree list panel.
 #[derive(Debug, Clone)]
 pub enum ListEntry {
+    /// The orchestrator status row shown at the top of the list when the
+    /// orchestrate tmux window exists.  Read-only / informational.
+    OrchestratorRow {
+        /// Current phase of the orchestrate window, e.g. "active", "done", "blocked".
+        phase: String,
+    },
     /// A super-group header row (selectable; Enter/Space toggles collapse).
     /// When collapsed, all projects and their worktrees in this group are hidden.
     GroupHeader {
@@ -223,6 +230,9 @@ pub struct App {
     /// Transient status message and when it was set.
     pub status_msg: Option<(String, Instant)>,
     pub session: String,
+    /// Current phase of the orchestrate tmux window, if it exists.
+    /// `None` means no `orchestrate` window is present in the session.
+    pub orchestrator_phase: Option<String>,
     /// The stable tmux window ID (e.g. `@3`) for the window running the TUI.
     ///
     /// This ID is assigned once at window creation and never changes, even when
@@ -411,6 +421,7 @@ impl App {
             stats_cache: HashMap::new(),
             status_msg: None,
             session,
+            orchestrator_phase: None,
             tui_window_id,
             should_quit: false,
             last_stats_idx: None,
@@ -652,7 +663,14 @@ impl App {
     /// Rebuild `self.entries` from the current `projects` snapshot.
     pub fn rebuild_entries(&mut self) {
         let current_wt_idx = self.selected_worktree_idx();
-        self.entries = Self::build_entries(&self.projects, &self.worktrees, &self.group_collapsed, &self.context_collapsed);
+        let mut entries = Self::build_entries(&self.projects, &self.worktrees, &self.group_collapsed, &self.context_collapsed);
+
+        // Prepend the orchestrator row when the orchestrate window exists.
+        if let Some(ref phase) = self.orchestrator_phase {
+            entries.insert(0, ListEntry::OrchestratorRow { phase: phase.clone() });
+        }
+
+        self.entries = entries;
 
         // Try to keep selection on the same worktree after rebuild.
         let new_sel = if let Some(wt_idx) = current_wt_idx {
@@ -848,6 +866,10 @@ impl App {
                 .unwrap_or_else(|| "idle".to_string());
             self.phases[i] = phase;
         }
+        // Refresh the orchestrator window phase.
+        self.orchestrator_phase = find_live_phase(&self.session, ORCHESTRATE_WINDOW);
+        // Rebuild entries so the OrchestratorRow appears/disappears as needed.
+        self.rebuild_entries();
         if self.show_preview {
             self.refresh_preview();
         }

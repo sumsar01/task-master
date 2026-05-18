@@ -219,6 +219,17 @@ fn render_worktree_list(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) {
             };
 
             match entry {
+                ListEntry::OrchestratorRow { phase } => {
+                    let phase_color = t.phase_color(phase);
+                    let line = Line::from(vec![
+                        Span::styled(
+                            " ⬡ orchestrate  ",
+                            base.fg(t.text_accent).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(format!("[{}]", phase), base.fg(phase_color)),
+                    ]);
+                    ListItem::new(line)
+                }
                 ListEntry::GroupHeader { name, collapsed } => {
                     let icon = if *collapsed { "○" } else { "●" };
                     let line = Line::from(vec![Span::styled(
@@ -746,6 +757,11 @@ fn render_context_hints(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
             &[("P", "add project"), ("?", "help"), ("q", "quit")]
         }
         Some(idx) => match app.entries.get(idx) {
+            Some(ListEntry::OrchestratorRow { .. }) => &[
+                ("O", "orchestrate"),
+                ("?", "help"),
+                ("q", "quit"),
+            ],
             Some(ListEntry::GroupHeader { .. }) => &[
                 ("Enter", "collapse/expand"),
                 ("P", "add project"),

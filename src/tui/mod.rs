@@ -1,6 +1,7 @@
 mod actions;
 mod app;
 mod input;
+mod pr_info;
 
 // Re-export everything external callers depend on.
 pub use app::{ActionKind, AddProjectStep, App, CloningOp, ListEntry, Mode, PrInfo};

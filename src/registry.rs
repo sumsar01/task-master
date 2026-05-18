@@ -882,3 +882,20 @@ ephemeral_branch_prefix = "feat/"
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// cmd_list
+// ---------------------------------------------------------------------------
+
+/// Print all configured projects and their worktrees to stdout.
+pub fn cmd_list(registry: &Registry) -> anyhow::Result<()> {
+    for project in &registry.projects {
+        println!("{} ({})", project.name, project.short);
+        for wt in &project.worktrees {
+            let window_name = format!("{}-{}", project.short, wt.name);
+            let abs = registry.base_dir.join(&project.repo).join(&wt.name);
+            println!("  {:<20} {}", window_name, abs.display());
+        }
+    }
+    Ok(())
+}

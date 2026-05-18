@@ -787,3 +787,35 @@ mod tests {
         assert_eq!(result, "");
     }
 }
+
+// ---------------------------------------------------------------------------
+// cmd_reset / cmd_close
+// ---------------------------------------------------------------------------
+
+/// Reset a worktree window's phase indicator back to idle.
+pub fn cmd_reset(worktree: &str) -> anyhow::Result<()> {
+    let session = current_session()?;
+    let base = base_window_name(worktree);
+    set_window_phase(&session, base, None)?;
+    println!("Reset '{}' to idle.", base);
+    Ok(())
+}
+
+/// Close (kill) the tmux window for a worktree.
+///
+/// If the window is running an agent it will be killed immediately.
+pub fn cmd_close(session: &str, worktree: &str) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    let base = base_window_name(worktree);
+    if let Some(idx) = find_window_index(session, base) {
+        let target = format!("{}:{}", session, idx);
+        std::process::Command::new("tmux")
+            .args(["kill-window", "-t", &target])
+            .status()
+            .with_context(|| format!("Failed to kill tmux window '{}'", target))?;
+        println!("Closed window '{}'.", base);
+    } else {
+        anyhow::bail!("Window '{}' not found in session '{}'", base, session);
+    }
+    Ok(())
+}

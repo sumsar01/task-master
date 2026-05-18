@@ -1,5 +1,6 @@
 use super::actions::execute_close;
 use super::app::{ActionKind, AddProjectStep, App, ListEntry, Mode};
+use crate::tmux::cmd_reset;
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use std::time::Duration;
@@ -291,7 +292,7 @@ fn handle_normal(app: &mut App, code: KeyCode) -> Result<()> {
             }
             if let Some(wt) = app.selected_worktree() {
                 let name = wt.window_name.clone();
-                match crate::cmd_reset(&name) {
+                match cmd_reset(&name) {
                     Ok(()) => {
                         // tmux rename-window (issued inside cmd_reset) can briefly
                         // steal focus away from the TUI window — same race as

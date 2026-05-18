@@ -1,5 +1,8 @@
 use super::app::{ActionKind, AddProjectStep, App, CloningOp, Mode};
+use crate::add_project::cmd_add_project;
+use crate::spawn::cmd_send;
 use crate::tmux;
+use crate::tmux::cmd_close;
 use anyhow::Result;
 
 /// How long to wait (ms) after spawning/killing a tmux window before
@@ -292,7 +295,7 @@ pub fn execute_close(app: &mut App) -> Result<()> {
             None => return Ok(()),
         }
     };
-    match crate::cmd_close(&app.session, &wt_name) {
+    match cmd_close(&app.session, &wt_name) {
         Ok(()) => {
             refocus_tui_window(&app.session, &app.tui_window_id);
             app.mode = Mode::Normal;
@@ -398,7 +401,7 @@ pub fn execute_send_build(app: &mut App) -> Result<()> {
             // exists. Send the message directly and rename the window to :dev.
             // We do NOT spawn a fresh agent — 'b' means "send message", not
             // "spawn". Use 's' to spawn a fresh agent.
-            match crate::cmd_send(&app.registry, &wt_name, &prompt) {
+            match cmd_send(&app.registry, &wt_name, &prompt) {
                 Ok(()) => {
                     let _ = crate::tmux::set_window_phase(&session, &wt_name, Some("dev"));
                     let _ = tmux::select_window_by_id(&app.session, &app.tui_window_id);
@@ -415,7 +418,7 @@ pub fn execute_send_build(app: &mut App) -> Result<()> {
         }
         SendBuildAction::SendDirect => {
             // Already in build mode — send normally.
-            match crate::cmd_send(&app.registry, &wt_name, &prompt) {
+            match cmd_send(&app.registry, &wt_name, &prompt) {
                 Ok(()) => {
                     let _ = tmux::select_window_by_id(&app.session, &app.tui_window_id);
                     app.set_status(format!("Sent message to {}.", wt_name));
@@ -711,7 +714,7 @@ pub fn execute_add_project(app: &mut App) -> Result<()> {
 
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
-                let result = crate::cmd_add_project(
+                let result = cmd_add_project(
                     &base_dir,
                     &name,
                     &short,

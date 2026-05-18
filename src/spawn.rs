@@ -10,21 +10,13 @@ use tracing::info;
 // Prompt builder
 // ---------------------------------------------------------------------------
 
-/// Build the full prompt passed to the opencode spawn session.
+/// The mandatory PR workflow instructions injected into every spawn prompt.
 ///
-/// Wraps the user-provided task description with mandatory PR workflow steps
-/// so every spawned agent knows how to open a PR and notify the supervisor.
-pub fn build_spawn_prompt(window_name: &str, user_prompt: &str) -> String {
-    let base_name = tmux::base_window_name(window_name);
+/// Extracted to avoid duplicating this text between `build_spawn_prompt` and
+/// `build_ephemeral_spawn_prompt`.
+fn pr_workflow_section(base_name: &str) -> String {
     format!(
-        "{user_prompt}
-
-## Starting point
-
-Your worktree has been reset to master. Create a new branch before making any changes:
-  git checkout -b feat/<short-description>
-
-## PR workflow (MANDATORY)
+        "## PR workflow (MANDATORY)
 
 When you are ready to open a PR, you MUST follow these steps in order:
 
@@ -41,8 +33,27 @@ NEVER use `gh pr create` without `--no-push` — it pushes via the GitHub API an
 bypasses the git post-push hook, so QA will never start automatically.
 NEVER call `task-master qa` directly — it replaces the running process and will kill
 your session before the command can return. Always use `task-master notify` instead.",
-        user_prompt = user_prompt,
         base_name = base_name,
+    )
+}
+
+/// Build the full prompt passed to the opencode spawn session.
+///
+/// Wraps the user-provided task description with mandatory PR workflow steps
+/// so every spawned agent knows how to open a PR and notify the supervisor.
+pub fn build_spawn_prompt(window_name: &str, user_prompt: &str) -> String {
+    let base_name = tmux::base_window_name(window_name);
+    format!(
+        "{user_prompt}
+
+## Starting point
+
+Your worktree has been reset to master. Create a new branch before making any changes:
+  git checkout -b feat/<short-description>
+
+{pr_workflow}",
+        user_prompt = user_prompt,
+        pr_workflow = pr_workflow_section(base_name),
     )
 }
 
@@ -64,29 +75,13 @@ pub fn build_ephemeral_spawn_prompt(
 This is an ephemeral worktree. Your branch `{branch_name}` has already been created.
 You do NOT need to run `git checkout -b` — start committing directly on this branch.
 
-## PR workflow (MANDATORY)
-
-When you are ready to open a PR, you MUST follow these steps in order:
-
-1. Push the branch explicitly (with -u to set upstream tracking):
-   git push -u origin HEAD
-
-2. Open the PR with --no-push and --label wip:
-   gh pr create --no-push --label wip --title \"<title>\" --body \"<body>\"
-
-3. Read the PR number from the URL printed by gh pr create, then notify the supervisor:
-   task-master notify {base_name} <pr-number>
-
-NEVER use `gh pr create` without `--no-push` — it pushes via the GitHub API and
-bypasses the git post-push hook, so QA will never start automatically.
-NEVER call `task-master qa` directly — it replaces the running process and will kill
-your session before the command can return. Always use `task-master notify` instead.
+{pr_workflow}
 
 Note: this worktree is ephemeral. It will be automatically removed after its PR is
 merged or closed via `task-master cleanup --merged`.",
         user_prompt = user_prompt,
         branch_name = branch_name,
-        base_name = base_name,
+        pr_workflow = pr_workflow_section(base_name),
     )
 }
 
@@ -243,4 +238,21 @@ pub fn cmd_spawn_ephemeral(
         "Created ephemeral worktree '{}' (branch '{}').\nSpawned agent in '{}:dev'.",
         resolved_window_name, branch_name, base_name
     ))
+}
+
+// ---------------------------------------------------------------------------
+// cmd_send
+// ---------------------------------------------------------------------------
+
+/// Send a prompt directly to the running opencode session in a worktree window.
+///
+/// Unlike `cmd_spawn`, this does **not** reset the branch, does not kill the
+/// existing session, and does not append any PR-workflow boilerplate. It is the
+/// equivalent of the user typing the prompt into the opencode TUI by hand.
+pub fn cmd_send(registry: &Registry, worktree_name: &str, prompt: &str) -> anyhow::Result<()> {
+    let wt = registry.require_worktree(worktree_name)?;
+    let session = tmux::current_session()?;
+    tmux::send_to_window(&session, &wt.window_name, prompt)?;
+    println!("Sent to '{}': {}", wt.window_name, prompt);
+    Ok(())
 }

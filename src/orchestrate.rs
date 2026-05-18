@@ -199,27 +199,99 @@ IMPORTANT RULES\n\
 }
 
 // ---------------------------------------------------------------------------
+// Window naming helpers
+// ---------------------------------------------------------------------------
+
+/// Generate the tmux window base name for an orchestrator with the given label.
+///
+/// Label should be a short slug (max ~20 chars) derived from the first few
+/// words of the task description.  Example: "implement-oauth-login".
+pub fn orchestrate_window_name(label: &str) -> String {
+    format!("orchestrate-{}", label)
+}
+
+/// Returns `true` when `name` looks like an orchestrator window base name
+/// (i.e. starts with `"orchestrate-"`).
+pub fn is_orchestrate_window(name: &str) -> bool {
+    name.starts_with("orchestrate-")
+}
+
+/// Derive a short label from a task description: take the first 3 words,
+/// lowercase, replace non-alphanumeric runs with `-`, truncate to 20 chars.
+pub fn label_from_task(task: &str) -> String {
+    let slug: String = task
+        .split_whitespace()
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("-");
+    let clean: String = slug
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' { c.to_ascii_lowercase() } else { '-' })
+        .collect();
+    // Collapse runs of `-` and trim to 20 chars.
+    let collapsed: String = clean
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    collapsed.chars().take(20).collect()
+}
+
+/// List all orchestrator window base names currently alive in `session`.
+/// Returns pairs of `(base_name, phase)`.
+pub fn list_live_orchestrators(session: &str) -> Vec<(String, String)> {
+    use crate::status::find_live_phase;
+    // tmux list-windows to get all window names, then filter for orchestrate- prefix.
+    let output = std::process::Command::new("tmux")
+        .args([
+            "list-windows",
+            "-t",
+            session,
+            "-F",
+            "#{window_name}",
+        ])
+        .output();
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => return vec![],
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut result = Vec::new();
+    for line in stdout.lines() {
+        let base = tmux::base_window_name(line);
+        if is_orchestrate_window(base) {
+            let phase = find_live_phase(session, base).unwrap_or_default();
+            // Avoid duplicates (multiple lines same base with different phases)
+            if !result.iter().any(|(b, _): &(String, String)| b == base) {
+                result.push((base.to_string(), phase));
+            }
+        }
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
 // Command
 // ---------------------------------------------------------------------------
 
-/// The fixed tmux window name for the orchestrator.
-/// Like `supervisor`, it is not tied to any specific project worktree.
-pub const ORCHESTRATE_WINDOW: &str = "orchestrate";
-
-/// Spawn (or replace) the orchestrator agent in its dedicated tmux window.
+/// Spawn a new orchestrator agent in a fresh tmux window named
+/// `orchestrate-<label>` where `label` is derived from the first few words of
+/// `task`.  Multiple orchestrators can coexist simultaneously.
 ///
-/// The orchestrator window is named `orchestrate` (no project prefix) and
-/// uses the `:active` phase suffix while running. It is not registered in
-/// `task-master.toml` — it is ephemeral by nature and managed entirely by
-/// its tmux window lifecycle.
+/// Unlike the old single-window design, this never replaces an existing window.
+/// Each call always creates a brand-new window so concurrent tasks run in
+/// parallel orchestrators.
 pub fn cmd_orchestrate(registry: &Registry, task: &str) -> Result<String> {
     let session = tmux::current_session()?;
+
+    let label = label_from_task(task);
+    let window_base = orchestrate_window_name(&label);
 
     // Capture a live registry snapshot at spawn time so the agent has
     // full situational awareness in its initial prompt.
     let registry_snapshot = format_registry_snapshot(registry);
 
-    let prompt = build_orchestrate_prompt(task, &session, ORCHESTRATE_WINDOW, &registry_snapshot);
+    let prompt = build_orchestrate_prompt(task, &session, &window_base, &registry_snapshot);
 
     // The orchestrator runs from the task-master base directory (where
     // task-master.toml lives), giving it access to the full registry.
@@ -227,37 +299,20 @@ pub fn cmd_orchestrate(registry: &Registry, task: &str) -> Result<String> {
 
     info!(
         "[{}] Spawning orchestrator in session '{}'",
-        ORCHESTRATE_WINDOW, session
+        window_base, session
     );
 
-    let window_exists = tmux::find_window_index(&session, ORCHESTRATE_WINDOW).is_some();
+    // Always create a new window — never replace an existing one.
+    tmux::spawn_window(&session, &window_base, &working_dir, &prompt, Some("orchestrate"), None)?;
+    tmux::set_window_phase(&session, &window_base, Some("active"))?;
 
-    let msg = if window_exists {
-        // Replace whatever is running with a fresh orchestrator session.
-        tmux::set_window_phase(&session, ORCHESTRATE_WINDOW, Some("active"))?;
-        tmux::replace_window_process(
-            &session,
-            ORCHESTRATE_WINDOW,
-            &working_dir,
-            &prompt,
-            Some("orchestrate"),
-            None,
-        )?;
-        format!(
-            "Replaced existing '{}' window with fresh orchestrator session (now '{}:active').",
-            ORCHESTRATE_WINDOW, ORCHESTRATE_WINDOW
-        )
-    } else {
-        // spawn_window creates "orchestrate:dev"; we immediately rename it to "orchestrate:active".
-        tmux::spawn_window(&session, ORCHESTRATE_WINDOW, &working_dir, &prompt, Some("orchestrate"), None)?;
-        tmux::set_window_phase(&session, ORCHESTRATE_WINDOW, Some("active"))?;
-        format!(
-            "Spawned orchestrator in new window '{}:active'.",
-            ORCHESTRATE_WINDOW
-        )
-    };
+    info!(
+        "[{}] Orchestrator started in window '{}:active'.",
+        window_base, window_base
+    );
 
-    Ok(msg)
+    // Return the window base name so callers can record group association.
+    Ok(window_base)
 }
 
 // ---------------------------------------------------------------------------
@@ -273,7 +328,7 @@ mod tests {
         let prompt = build_orchestrate_prompt(
             "add distributed tracing across all services",
             "mysession",
-            "orchestrate",
+            "orchestrate-add-distribute",
             "snapshot",
         );
         assert!(prompt.contains("add distributed tracing across all services"));
@@ -283,16 +338,42 @@ mod tests {
     fn test_build_orchestrate_prompt_contains_snapshot() {
         let snapshot = "PROJECT  SHORT  WORKTREE  PHASE\nmy-svc   SVC    SVC-main  idle";
         let prompt =
-            build_orchestrate_prompt("some task", "sess", "orchestrate", snapshot);
+            build_orchestrate_prompt("some task", "sess", "orchestrate-some-task", snapshot);
         assert!(prompt.contains("SVC-main"));
         assert!(prompt.contains("idle"));
     }
 
     #[test]
+    fn test_label_from_task() {
+        assert_eq!(label_from_task("implement oauth login flow"), "implement-oauth-logi"); // truncated at 20
+        assert_eq!(label_from_task("add distributed tracing"), "add-distributed-trac"); // truncated at 20
+        assert_eq!(label_from_task("fix"), "fix");
+        assert_eq!(label_from_task("  spaces  everywhere  today  "), "spaces-everywhere-to"); // truncated at 20
+        // always within 20 chars
+        let long = label_from_task("abcdefghijk mnopqr stuvwx");
+        assert!(long.len() <= 20);
+    }
+
+    #[test]
+    fn test_orchestrate_window_name() {
+        assert_eq!(orchestrate_window_name("implement-oauth"), "orchestrate-implement-oauth");
+    }
+
+    #[test]
+    fn test_is_orchestrate_window() {
+        assert!(is_orchestrate_window("orchestrate-foo"));
+        assert!(is_orchestrate_window("orchestrate-implement-oauth-login"));
+        assert!(!is_orchestrate_window("orchestrate")); // old fixed name
+        assert!(!is_orchestrate_window("WIS-olive"));
+        assert!(!is_orchestrate_window("supervisor"));
+    }
+
+    #[test]
     fn test_build_orchestrate_prompt_contains_done_rename() {
-        let prompt = build_orchestrate_prompt("task", "sess", "orchestrate", "snap");
+        let window = orchestrate_window_name("my-task");
+        let prompt = build_orchestrate_prompt("task", "sess", &window, "snap");
         assert!(
-            prompt.contains("orchestrate:done"),
+            prompt.contains(&format!("{}:done", window)),
             "prompt must reference :done rename"
         );
         assert!(
@@ -303,16 +384,17 @@ mod tests {
 
     #[test]
     fn test_build_orchestrate_prompt_contains_blocked_rename() {
-        let prompt = build_orchestrate_prompt("task", "sess", "orchestrate", "snap");
+        let window = orchestrate_window_name("my-task");
+        let prompt = build_orchestrate_prompt("task", "sess", &window, "snap");
         assert!(
-            prompt.contains("orchestrate:blocked"),
+            prompt.contains(&format!("{}:blocked", window)),
             "prompt must reference :blocked rename"
         );
     }
 
     #[test]
     fn test_build_orchestrate_prompt_no_code_changes() {
-        let prompt = build_orchestrate_prompt("task", "s", "orchestrate", "snap");
+        let prompt = build_orchestrate_prompt("task", "s", "orchestrate-foo", "snap");
         assert!(
             prompt.contains("Do NOT modify any source files"),
             "prompt must forbid code changes"
@@ -325,7 +407,7 @@ mod tests {
 
     #[test]
     fn test_build_orchestrate_prompt_spawn_instructions() {
-        let prompt = build_orchestrate_prompt("task", "s", "orchestrate", "snap");
+        let prompt = build_orchestrate_prompt("task", "s", "orchestrate-foo", "snap");
         assert!(prompt.contains("task-master spawn"));
         assert!(prompt.contains("task-master spawn --ephemeral"));
         assert!(prompt.contains("task-master status"));
@@ -334,7 +416,7 @@ mod tests {
 
     #[test]
     fn test_build_orchestrate_prompt_bd_commands() {
-        let prompt = build_orchestrate_prompt("task", "s", "orchestrate", "snap");
+        let prompt = build_orchestrate_prompt("task", "s", "orchestrate-foo", "snap");
         assert!(prompt.contains("bd create"));
         assert!(prompt.contains("bd update"));
         assert!(prompt.contains("bd close"));
@@ -342,18 +424,19 @@ mod tests {
 
     #[test]
     fn test_build_orchestrate_prompt_uses_awk_rename() {
-        let prompt = build_orchestrate_prompt("task", "sess", "orchestrate", "snap");
+        let window = orchestrate_window_name("my-task");
+        let prompt = build_orchestrate_prompt("task", "sess", &window, "snap");
         assert!(prompt.contains("awk"), "should use awk-based rename");
         assert!(
-            prompt.contains("orchestrate:done"),
+            prompt.contains(&format!("{}:done", window)),
             "should include :done phase"
         );
     }
 
     #[test]
     fn test_build_orchestrate_prompt_is_deterministic() {
-        let a = build_orchestrate_prompt("task", "sess", "orchestrate", "snap");
-        let b = build_orchestrate_prompt("task", "sess", "orchestrate", "snap");
+        let a = build_orchestrate_prompt("task", "sess", "orchestrate-foo", "snap");
+        let b = build_orchestrate_prompt("task", "sess", "orchestrate-foo", "snap");
         assert_eq!(a, b, "build_orchestrate_prompt must be deterministic");
     }
 

@@ -284,8 +284,8 @@ pub fn execute_e2e(app: &mut App) -> Result<()> {
 }
 
 pub fn execute_close(app: &mut App) -> Result<()> {
-    let wt_name = if app.selected_is_orchestrator() {
-        crate::orchestrate::ORCHESTRATE_WINDOW.to_string()
+    let wt_name = if let Some(window_name) = app.selected_orchestrator_window() {
+        window_name
     } else {
         match app.selected_worktree() {
             Some(wt) => wt.window_name.clone(),
@@ -315,8 +315,8 @@ pub fn execute_send(app: &mut App) -> Result<()> {
         return Ok(());
     }
 
-    let window_name = if app.selected_is_orchestrator() {
-        crate::orchestrate::ORCHESTRATE_WINDOW.to_string()
+    let window_name = if let Some(window_name) = app.selected_orchestrator_window() {
+        window_name
     } else {
         match app.selected_worktree() {
             Some(wt) => wt.window_name.clone(),
@@ -996,13 +996,22 @@ pub fn execute_orchestrate(app: &mut App) -> Result<()> {
         return Ok(());
     }
 
+    // Infer group from currently selected row before resetting input.
+    let group = app.selected_group();
+
     push_history(app, &task);
     app.reset_input();
 
     match crate::orchestrate::cmd_orchestrate(&app.registry, &task) {
-        Ok(_msg) => {
+        Ok(window_name) => {
             let _ = crate::tmux::select_window_by_id(&app.session, &app.tui_window_id);
-            app.set_status("Orchestrator started in 'orchestrate' window.".to_string());
+            app.set_status(format!("Orchestrator started in '{}'.", window_name));
+            // Record group association so rebuild_entries can place the row correctly.
+            app.orchestrators.push(crate::tui::app::OrchestratorEntry {
+                window_name: window_name.clone(),
+                group,
+                phase: "active".to_string(),
+            });
             app.refresh_phases();
             app.needs_full_redraw = true;
         }

@@ -51,6 +51,8 @@ pub fn render(f: &mut Frame, app: &App, t: &Theme) {
             }
         }
         Mode::Prompt(ActionKind::SpawnEphemeral) => (" Spawn Ephemeral — Enter task prompt ", true),
+        Mode::Prompt(ActionKind::E2e) => (" E2e Validation — Enter PR number ", true),
+        Mode::Prompt(ActionKind::Orchestrate) => (" Orchestrate — Enter cross-repo task ", true),
         _ => return,
     };
 

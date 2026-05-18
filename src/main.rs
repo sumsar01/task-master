@@ -2,6 +2,7 @@ mod cleanup;
 mod e2e;
 mod hooks;
 mod notify;
+mod orchestrate;
 mod plan;
 mod qa;
 mod registry;
@@ -50,6 +51,21 @@ enum Commands {
         /// full window name. A unique name like WIS-spruce-7f3a is generated automatically.
         #[arg(long, default_value_t = false)]
         ephemeral: bool,
+    },
+    /// Spawn an orchestrator agent to delegate a cross-repo task across multiple projects.
+    ///
+    /// The orchestrator lives in its own dedicated tmux window ('orchestrate') and is
+    /// responsible for decomposing the task, identifying relevant projects, spawning
+    /// sub-agents (using idle worktrees or ephemeral ones), and monitoring progress.
+    /// It never writes code itself — it only delegates and coordinates.
+    ///
+    /// Window lifecycle phases:
+    ///   orchestrate:active  — orchestrator is running
+    ///   orchestrate:done    — all sub-tasks complete
+    ///   orchestrate:blocked — stalled, needs human input
+    Orchestrate {
+        /// High-level task description to delegate across projects
+        task: String,
     },
     /// Spawn a planning agent to decompose a task into beads issues
     Plan {
@@ -238,6 +254,10 @@ fn main() -> Result<()> {
                         spawn::cmd_spawn(&registry, &worktree, &prompt, force)
                             .map(|msg| println!("{}", msg))
                     }
+                }
+                Commands::Orchestrate { task } => {
+                    orchestrate::cmd_orchestrate(&registry, &task)
+                        .map(|msg| println!("{}", msg))
                 }
                 Commands::Plan { worktree, prompt } => {
                     plan::cmd_plan(&registry, &worktree, &prompt).map(|msg| println!("{}", msg))

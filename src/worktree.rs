@@ -316,7 +316,7 @@ pub fn install_agent_configs(base_dir: &Path, worktree_path: &Path) -> Result<()
         )
     })?;
 
-    let agents = ["plan.md", "qa.md", "e2e.md"];
+    let agents = ["plan.md", "qa.md", "e2e.md", "orchestrate.md"];
     let mut installed = Vec::new();
     for name in &agents {
         let src = src_agents_dir.join(name);

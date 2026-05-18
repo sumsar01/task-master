@@ -46,6 +46,31 @@ When the user provides a task or plan to hand off to an agent, do the minimum ne
 
 **The agent owns everything else:** bd tracking, branching, code exploration, PRs, QA triggers.
 
+## Orchestrator Agent
+
+For tasks that span **multiple repos**, use the orchestrator instead of spawning individual agents manually:
+
+```bash
+task-master orchestrate "<high-level cross-repo task description>"
+```
+
+The orchestrator lives in its own dedicated tmux window (`orchestrate`) and is responsible for:
+- Reading the registry to understand which projects are available
+- Decomposing the task into per-project sub-tasks (tracked as beads issues)
+- Delegating to idle worktrees or spawning ephemeral ones
+- Monitoring progress and coordinating between sub-agents
+
+It never writes code itself — it only delegates and coordinates.
+
+### Orchestrator window lifecycle
+
+```
+orchestrate              <- idle
+orchestrate:active       <- orchestrator agent running, delegating work
+orchestrate:done         <- all sub-tasks complete
+orchestrate:blocked      <- stalled, needs human input
+```
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
 ## Beads Issue Tracker
 

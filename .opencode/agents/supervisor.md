@@ -81,8 +81,8 @@ For each line split on the first space: `index` and `name`.
 
 **Skip** windows that are:
 - Named `supervisor` (that's you)
-- Not matching any registered worktree base name
-- In phase `review`, `blocked`, `ready`, `dev-stalled`, `qa-stalled`, `plan-stalled`, `e2e-done`, `e2e-blocked` — terminal/human states
+- Not matching any registered worktree base name AND not named `orchestrate`
+- In phase `review`, `blocked`, `ready`, `dev-stalled`, `qa-stalled`, `plan-stalled`, `e2e-done`, `e2e-blocked`, `done` — terminal/human states
 - Have no phase suffix (idle, not yet started)
 
 ---
@@ -278,6 +278,32 @@ Read the pane. Determine which of these is true:
 2. **Shell prompt, no TUI** — the opencode process has exited without renaming the
    window (it would already be `:e2e-done` or `:e2e-blocked` and thus skipped if it had) →
    rename to `:e2e-blocked` and log it as a crash.
+
+### `orchestrate:active` window
+
+The orchestrator agent lives in a fixed window named `orchestrate` (not tied to any
+registered worktree). It uses `:active` while running, `:done` when finished, and
+`:blocked` when it needs human input. The supervisor monitors it for crashes only.
+
+Read the pane of the `orchestrate:active` window. Determine which of these is true:
+
+1. **TUI still running** — TUI chrome visible (spinner or idle input prompt) →
+   apply spinner heartbeat logic as normal (`/tmp/task-master-spinning-orchestrate`);
+   leave it alone otherwise.
+
+2. **Shell prompt, no TUI** — the opencode process has exited without renaming the
+   window (it would already be `:done` or `:blocked` and thus skipped if it had) →
+   rename to `orchestrate:blocked`, log as crash:
+   ```bash
+   tmux list-windows -t $SESSION -F '#{window_index} #{window_name}' \
+     | awk -F'[ :]' '$2=="orchestrate" {print $1}' \
+     | xargs -I{} tmux rename-window -t $SESSION:{} 'orchestrate:blocked'
+   ```
+   Log: `orchestrate: agent exited without completing — renamed to :blocked`
+   Clear the spinning stamp:
+   ```bash
+   rm -f /tmp/task-master-spinning-orchestrate 2>/dev/null
+   ```
 
 ---
 

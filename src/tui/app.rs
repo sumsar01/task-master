@@ -795,6 +795,14 @@ impl App {
             .and_then(|i| self.worktrees.get(i))
     }
 
+    /// Returns true when the currently selected entry is the orchestrator row.
+    pub fn selected_is_orchestrator(&self) -> bool {
+        self.selected()
+            .and_then(|i| self.entries.get(i))
+            .map(|e| matches!(e, ListEntry::OrchestratorRow { .. }))
+            .unwrap_or(false)
+    }
+
     pub fn selected_phase(&self) -> &str {
         match self.selected_worktree_idx() {
             Some(i) => self.phases.get(i).map(|s| s.as_str()).unwrap_or("?"),
@@ -887,6 +895,19 @@ impl App {
     /// has scrolled up (`preview_scroll > 0`) the content is refreshed but the
     /// scroll offset is preserved so they can keep reading history.
     pub fn refresh_preview(&mut self) {
+        // Orchestrator row: capture the orchestrate tmux window.
+        if self.selected_is_orchestrator() {
+            let lines = tmux::capture_pane(&self.session, crate::orchestrate::ORCHESTRATE_WINDOW)
+                .unwrap_or_default();
+            self.preview_lines = lines;
+            self.last_preview_idx = None;
+            let max_scroll = self.preview_lines.len().saturating_sub(1);
+            if self.preview_scroll > max_scroll {
+                self.preview_scroll = 0;
+            }
+            return;
+        }
+
         let (wt_idx, wt) = match self
             .selected_worktree_idx()
             .and_then(|i| self.worktrees.get(i).map(|w| (i, w.clone())))
@@ -919,6 +940,17 @@ impl App {
     /// PR information is fetched asynchronously via a background thread.
     /// The result arrives in `pr_info_rx` and is polled by the run_loop.
     pub fn refresh_detail(&mut self) {
+        // Orchestrator row: show phase info instead of git detail.
+        if self.selected_is_orchestrator() {
+            self.detail_lines.clear();
+            let phase = self.orchestrator_phase.clone().unwrap_or_else(|| "unknown".to_string());
+            self.detail_lines.push(format!("Window:  orchestrate"));
+            self.detail_lines.push(format!("Phase:   {}", phase));
+            self.detail_lines.push(String::new());
+            self.detail_lines.push("Press 'a' to attach to the orchestrator window.".to_string());
+            return;
+        }
+
         let wt = match self.selected_worktree() {
             Some(w) => w.clone(),
             None => {

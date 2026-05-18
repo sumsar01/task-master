@@ -309,6 +309,15 @@ fn handle_normal(app: &mut App, code: KeyCode) -> Result<()> {
             super::actions::execute_open_pr(app)?;
         }
         KeyCode::Char('a') if !is_burst => {
+            // Orchestrator row: attach directly to the orchestrate window.
+            if app.selected_is_orchestrator() {
+                super::actions::attach_to_window(
+                    &app.session,
+                    crate::orchestrate::ORCHESTRATE_WINDOW,
+                    crate::orchestrate::ORCHESTRATE_WINDOW,
+                );
+                return Ok(());
+            }
             let phase = app.selected_phase().to_string();
             if !app.require_worktree_selected() {
                 return Ok(());
